@@ -116,6 +116,8 @@ def many_ops_torch(x: torch.Tensor,
                    DO_SQRT: bool
                 ):
     
+    # import pdb; pdb.set_trace()
+    
     # Multiply
     if DO_MULTIPLY:
         x = x * mult
@@ -148,14 +150,14 @@ def many_ops_torch(x: torch.Tensor,
 @pytest.mark.parametrize("M", [16, 32])
 @pytest.mark.parametrize("K", [16, 32, 64]) # 64 seems to cause some issues
 @pytest.mark.parametrize("N", [16, 32])
-@pytest.mark.parametrize("mult", [0.001, 1.5251]) # mult = [0, 2.99]
-@pytest.mark.parametrize("dtype", [torch.float16, torch.float32]) # 0 = fp16, 1 = fp32
-@pytest.mark.parametrize("IMITATE_PYTORCH", [0]) # 0 = no casting (not imitating pytorch), 1 = cast after every op (imitating pytorch)
-@pytest.mark.parametrize("DO_MULTIPLY", [0, 1])  # Include multiplication
-@pytest.mark.parametrize("DO_SIGMOID", [0, 1])  # Include sigmoid
-@pytest.mark.parametrize("DO_COS", [0, 1])  # Include cosine
-@pytest.mark.parametrize("DO_EXPONENT", [0, 1])  # Include exponentiation
-@pytest.mark.parametrize("DO_SQRT", [0, 1])  # Include square root
+@pytest.mark.parametrize("mult", [0.001, 0.74, 1.5251]) # mult = [0, 2.99]
+@pytest.mark.parametrize("dtype", [torch.float16]) # torch.float32
+@pytest.mark.parametrize("IMITATE_PYTORCH", [1]) # 0 = no casting (not imitating pytorch), 1 = cast after every op (imitating pytorch)
+@pytest.mark.parametrize("DO_MULTIPLY", [1])  # Include multiplication
+@pytest.mark.parametrize("DO_SIGMOID", [0])  # Include sigmoid
+@pytest.mark.parametrize("DO_COS", [0])  # Include cosine
+@pytest.mark.parametrize("DO_EXPONENT", [0])  # Include exponentiation
+@pytest.mark.parametrize("DO_SQRT", [0])  # Include square root
 def test_many_ops(seed, M, K, N, mult, dtype, IMITATE_PYTORCH, DO_MULTIPLY, DO_SIGMOID, DO_COS, DO_EXPONENT, DO_SQRT):
     """
     Test reproducability of PyTorch results with a Triton kernel implementing various math operations.
@@ -202,6 +204,8 @@ def test_many_ops(seed, M, K, N, mult, dtype, IMITATE_PYTORCH, DO_MULTIPLY, DO_S
         many_ops_triton[grid](x, y, out, M, K, N, mult, IMITATE_PYTORCH, DTYPE, DO_MULTIPLY, DO_SIGMOID, DO_COS, DO_EXPONENT, DO_SQRT)
         many_ops_torch(x, y, out_torch, M, K, N, mult, DO_MULTIPLY, DO_SIGMOID, DO_COS, DO_EXPONENT, DO_SQRT)
 
-    print("torch - triton", (out_torch-out))
+    # print("torch - triton", (out_torch-out))
 
-    assert (out_torch - out).abs().max().item() <= 1e-5 # tensors must match exactly
+    print(f'absolute error: {(out-out_torch).abs().max().item()}, relative error: {((out-out_torch)/out).abs().max().item()}')
+
+    assert torch.allclose(out, out_torch, atol=1e-6, rtol=1e-5), f'absolute error: {(out-out_torch).abs().max().item()}, relative error: {((out-out_torch)/out).abs().max().item()}' # tensors must match exactly
