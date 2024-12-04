@@ -6,6 +6,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import os
+import csv
 
 from einops import rearrange, repeat
 
@@ -67,6 +68,8 @@ def time_fwd(func, *args, **kwargs):
     time_f = benchmark_forward(func, *args, **kwargs)
     return time_f[1].mean
 
+def make_csv_row(causal, headdim, batch_size, seqlen, speed_fp8, speed_f16):
+    return [causal, headdim, batch_size, seqlen, speed_fp8, speed_f16]
 
 repeats = 30
 device = 'cuda'
@@ -93,7 +96,10 @@ It makes fp8 kernels have lower throughput than fp16 counterparts.
 We can disable scaling using the following env variable:
 
 FLASH_ATTENTION_TRITON_AMD_REMOVE_QUANT_SCALE=1
+
 """
+csv_rows = [['causal', 'headdim', 'batch_size', 'seqlen', 'speed_fp8', 'speed_f16']]
+
 for causal in causal_vals:
     for headdim in headdim_vals:
         for batch_size, seqlen in bs_seqlen_vals:
@@ -111,15 +117,26 @@ for causal in causal_vals:
             )
             time_f[config, "Flash2_fp16"] = t_fp16
 
-            print(f"\n### ENABLE_QUANTIZATION_SCALING={os.getenv('FLASH_ATTENTION_TRITON_AMD_REMOVE_QUANT_SCALE') != 1}, causal={causal}, headdim={headdim}, batch_size={batch_size}, seqlen={seqlen} ###")
+            print(f"[{causal}-{headdim}-{batch_size}-{seqlen}]\t\t", end='')
             for method in methods:
                 speed_f[config, method] = efficiency(
                     flops(batch_size, seqlen, headdim, nheads, causal, mode="fwd"),
                     time_f[config, method]
                 )
                 print(
-                    f"{method} fwd: {speed_f[config, method]:.2f} TFLOPs/s, "
+                    f"{method} fwd: {speed_f[config, method]:.2f} TFLOPs/s\t", end=''
                 )
+            print('')
+
+            csv_rows.append([causal, headdim, batch_size, seqlen, speed_f[config, 'Flash2_fp8'], speed_f[config, 'Flash2_fp16']])
+csv_rows.append(['QUANTIZATION_SCALING_ENABLED: ', 'True' if os.getenv('FLASH_ATTENTION_TRITON_AMD_REMOVE_QUANT_SCALE') != '1' else 'False'])
+
+with open('fp8_benchmark.csv', 'w', newline='') as csvfile:
+    csvwriter = csv.writer(csvfile)
+    csvwriter.writerows(csv_rows)
+
+
+print(f"\nQUANTIZATION_SCALING_ENABLED: {os.getenv('FLASH_ATTENTION_TRITON_AMD_REMOVE_QUANT_SCALE') != '1'}")
 
 
 # with open('flash2_attn_time.plk', 'wb') as fp:
