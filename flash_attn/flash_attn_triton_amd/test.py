@@ -10,7 +10,7 @@ from .bwd_ref import attention_backward_pytorch_ref_impl
 from .fwd_decode import dequantize_kv_fp16, quantize_kv_int4
 
 # defailt fp16 tolerance is ATOL, RTOL = 1e-5, 1e-3. See table https://pytorch.org/docs/stable/testing.html
-ATOL, RTOL = 1e-2, 1e-2 # old standard. maybe to lose. 
+ATOL, RTOL = 1e-2, 0 # old standard. maybe to lose. 
 # ATOL, RTOL = 1e-3, 1e-3  # catchs fa mismatch issues
 # ATOL, RTOL = 1e-4, 1e-3 # to strict. there will be small diffs
 # ATOL, RTOL = 1e-5, 1e-3 # # default fp16. there will be small diffs
@@ -380,9 +380,9 @@ def test_op_bwd(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, torch_sdpa_test, use_ali
 @pytest.mark.parametrize('dropout_p', [0.0])
 @pytest.mark.parametrize('layout', ["bhsd", "bshd", "thd"])
 @pytest.mark.parametrize('use_exp2', [True, False]) # works when use_exp2 is false
+@pytest.mark.parametrize('dtype', [torch.float8_e4m3fnuz, torch.float16])
 @pytest.mark.parametrize('DEBUG_INPUT', [False]) # NOTE: debug input can overflow when the tensors are large. Just use to figure out issues
-def test_op_prefill_fwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, layout, use_exp2, DEBUG_INPUT):
-    dtype = torch.float16
+def test_op_prefill_fwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, layout, use_exp2, dtype, DEBUG_INPUT):
     torch.manual_seed(0)
     alibi_slopes = None
     device = "cuda"
@@ -390,11 +390,13 @@ def test_op_prefill_fwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropou
     if layout == "thd":
         q, k, v, metadata = varlen_input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, device=device, DEBUG_INPUT=DEBUG_INPUT)
     else:
-        q, k, v, metadata = input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout, device=device, DEBUG_INPUT=DEBUG_INPUT)
+        q, k, v, q_fp32, k_fp32, v_fp32, metadata = input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout, device=device, DEBUG_INPUT=DEBUG_INPUT)
     if DEBUG_INPUT:
         output_triton = torch.zeros_like(q).contiguous()
     else:
         output_triton = torch.empty_like(q)
+
+    output_triton = output_triton.to(torch.float32) # this massively improved accuracy. The output tensor needs to be of high precision
 
     if DEBUG:
         if HQ // HK != 1:
@@ -434,9 +436,9 @@ def test_op_prefill_fwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropou
                                                 metadata.use_exp2)
 
     output_ref, softmax_lse_ref, sd_mask_ref  = attention_forward_pytorch_ref_impl(
-        q.clone(), 
-        k.clone(), 
-        v.clone(), 
+        q_fp32, 
+        k_fp32, 
+        v_fp32, 
         metadata.sm_scale, 
         causal, 
         layout,
@@ -469,7 +471,8 @@ def test_op_prefill_fwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropou
     if DEBUG:
         print("output_triton:", output_triton, output_triton.shape)
         print("output_ref:", output_ref, output_ref.shape)
-    torch.testing.assert_close(output_triton, output_ref, atol=ATOL, rtol=RTOL)
+    print('avg error: ', torch.abs(output_triton.to(torch.float32) - output_ref.to(torch.float32)).mean().item())
+    torch.testing.assert_close(output_triton.to(torch.float32), output_ref.to(torch.float32), atol=ATOL, rtol=RTOL)
 
 @pytest.mark.parametrize(
     "Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD", [
@@ -523,9 +526,9 @@ def test_op_prefill_fwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropou
 @pytest.mark.parametrize('use_exp2', [False]) # FIXME: using exp2 causes issue when used with causal
 @pytest.mark.parametrize('layout', ["bhsd", "bshd", "thd"])
 @pytest.mark.parametrize('sequence_parallel', [True, False])
+@pytest.mark.parametrize('dtype', [torch.float8_e4m3fnuz, torch.float16])
 @pytest.mark.parametrize('DEBUG_INPUT', [False]) # debug output causes nans on larger tensors
-def test_op_prefill_bwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, use_exp2, layout, sequence_parallel, DEBUG_INPUT):
-    dtype = torch.float16
+def test_op_prefill_bwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, use_exp2, layout, sequence_parallel, dtype, DEBUG_INPUT):
     torch.manual_seed(20) # seed from test_op_bwd
 
     alibi_slopes = None
