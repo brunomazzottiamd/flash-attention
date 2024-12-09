@@ -3,7 +3,6 @@ import triton
 import triton.language as tl
 from .utils import DEBUG, DROPOUT_USE_PYTORCH, DROPOUT_DUMP, AUTOTUNE, get_shape_from_layout, get_strides_from_layout, is_cdna, is_rdna, write_dropout_mask, create_dropout_mask, create_scale_tensors
 
-
 # NOTE: triton fails to import tl.constexprs so create them here for the file
 tl_DROPOUT_USE_PYTORCH: tl.constexpr = DROPOUT_USE_PYTORCH
 tl_DROPOUT_DUMP: tl.constexpr = DROPOUT_DUMP
@@ -576,8 +575,6 @@ def attention_prefill_forward_triton_impl(
         torch.float8_e5m2fnuz,
     }
     is_fp8 = q.dtype in fp8_types
-    is_fp8 = False
-    
     
     # if qkv are fp8, then find scaling factor for quantization
     q_scale, k_scale, v_scale = create_scale_tensors(q, k, v, SCALE_PER_HEAD=True, layout=layout) # TODO: if SCALE_PER_HEAD: within the kernel itself just compute qkv_scale = tl.max(q or k or v)
