@@ -1,7 +1,7 @@
 import torch
 import triton
 import triton.language as tl
-from .utils import DEBUG, DROPOUT_USE_PYTORCH, DROPOUT_DUMP, AUTOTUNE, get_shape_from_layout, get_strides_from_layout, is_cdna, is_rdna, write_dropout_mask, create_dropout_mask, create_scale_tensors
+from .utils import DEBUG, DROPOUT_USE_PYTORCH, DROPOUT_DUMP, AUTOTUNE, get_shape_from_layout, get_strides_from_layout, is_cdna, is_rdna, write_dropout_mask, create_dropout_mask, create_scale_tensors, check_is_fp8
 
 # NOTE: triton fails to import tl.constexprs so create them here for the file
 tl_DROPOUT_USE_PYTORCH: tl.constexpr = DROPOUT_USE_PYTORCH
@@ -183,9 +183,9 @@ def _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stri
         if IS_FP8:
             p_scale = 1
             p_scaled = (p / p_scale)
-            acc += tl.dot(p.to(v.type.element_ty), (v*v_scale).to(v.type.element_ty))
+            acc += tl.dot(p.to(v.type.element_ty), (v*v_scale).to(v.type.element_ty)) # if you want to use p_scaled: tl.dot(p_scaled.to(v.type.element_ty), v.to(v.type.element_ty)) * v_scale * p_scale
         else:
-            acc += tl.dot(p.to(v.type.element_ty), v)
+            acc += tl.dot(p.to(v.type.element_ty), v).to(tl.float32) # NOTE: acc += tl.dot(p.to(tl.float16), v.to(tl.float16)) PASSES
 
         
         k_ptrs += BLOCK_N * stride_kn
@@ -568,13 +568,7 @@ def attention_prefill_forward_triton_impl(
                                         return_softmax,
                                         use_exp2):
     
-    fp8_types = {
-        torch.float8_e4m3fnuz,
-        torch.float8_e4m3fn,  
-        torch.float8_e5m2,
-        torch.float8_e5m2fnuz,
-    }
-    is_fp8 = q.dtype in fp8_types
+    is_fp8 = check_is_fp8(q)
     
     # if qkv are fp8, then find scaling factor for quantization
     q_scale, k_scale, v_scale = create_scale_tensors(q, k, v, SCALE_PER_HEAD=True, layout=layout) # TODO: if SCALE_PER_HEAD: within the kernel itself just compute qkv_scale = tl.max(q or k or v)

@@ -11,6 +11,7 @@ import triton.language as tl
 AUTOTUNE = os.environ.get('FLASH_ATTENTION_TRITON_AMD_AUTOTUNE', '0').lower() in ('1', 'true', 'yes')
 DEBUG = os.environ.get('FLASH_ATTENTION_TRITON_AMD_DEBUG', '0').lower() in ('1', 'true', 'yes')
 PERF = os.environ.get('FLASH_ATTENTION_TRITON_AMD_PERF', '0').lower() in ('1', 'true', 'yes')
+REMOVE_QUANTIZATION_SCALING = os.environ.get('FLASH_ATTENTION_TRITON_AMD_REMOVE_QUANT_SCALE', '0').lower() in ('1', 'true', 'yes')
 USE_TRITON_ROCM = os.getenv("FLASH_ATTENTION_TRITON_AMD_ENABLE", "FALSE") == "TRUE"
 if USE_TRITON_ROCM: # TODO remove this
     random.seed(42)
@@ -341,6 +342,18 @@ def is_cdna():
 def is_rdna():
     return is_hip() and get_arch() in ("gfx1030", "gfx1100", "gfx1101", "gfx1102", "gfx1200", "gfx1201")
 
+def check_is_fp8(x: torch.Tensor):
+    if REMOVE_QUANTIZATION_SCALING:
+        return False # makes all methods believe they aren't working with fp8s, so no scaling is applied
+    
+    fp8_types = {
+        torch.float8_e4m3fnuz,
+        torch.float8_e4m3fn,  
+        torch.float8_e5m2,
+        torch.float8_e5m2fnuz,
+    }
+    return x.dtype in fp8_types
+
 def create_scale_tensors(q, k, v, SCALE_PER_HEAD=False, layout='bshd'):
     """
     Create scale tensors for q and k based on the scaling configuration.
@@ -354,14 +367,7 @@ def create_scale_tensors(q, k, v, SCALE_PER_HEAD=False, layout='bshd'):
     Returns:
     tuple: (q_scale, k_scale, v_scale) tensors
     """
-    fp8_types = {
-        torch.float8_e4m3fnuz,
-        torch.float8_e4m3fn,  
-        torch.float8_e5m2,
-        torch.float8_e5m2fnuz,
-    }
-    is_fp8 = q.dtype in fp8_types
-    is_fp8 = False
+    is_fp8 = check_is_fp8(q)
 
     if layout == 'bhsd':
         seqlen_loc = 2
