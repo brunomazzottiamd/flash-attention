@@ -86,47 +86,40 @@ time_f_b = {}
 speed_f = {}
 speed_b = {}
 speed_f_b = {}
-for ENABLE_QUANTIZATION_SCALING in {False, True}:
-    """
-    NOTE: currently the torch.amax needed to find the scaling values of the fp8 tensors adds a huge amount of overhead. 
-    It makes fp8 kernels have lower throughput than fp16 counterparts. 
+"""
+NOTE: currently the torch.amax needed to find the scaling values of the fp8 tensors adds a huge amount of overhead. 
+It makes fp8 kernels have lower throughput than fp16 counterparts. 
 
-    We can disable scaling using the following env variable:
-    
-    FLASH_ATTENTION_TRITON_AMD_REMOVE_QUANT_SCALE=1
-    """
-    # Enables and disables scaling. Currently scaling hurts performance greatly.
-    if ENABLE_QUANTIZATION_SCALING:
-        os.environ["FLASH_ATTENTION_TRITON_AMD_REMOVE_QUANT_SCALE"] = "0"
-    else:
-        os.environ["FLASH_ATTENTION_TRITON_AMD_REMOVE_QUANT_SCALE"] = "1"
+We can disable scaling using the following env variable:
 
-    for causal in causal_vals:
-        for headdim in headdim_vals:
-            for batch_size, seqlen in bs_seqlen_vals:
-                config = (causal, headdim, batch_size, seqlen)
-                nheads = dim // headdim
-                qkv = torch.randn(batch_size, seqlen, 3, nheads, headdim, device=device, dtype=dtype,
-                                requires_grad=True)
-                t_fp8 = time_fwd(
-                    flash_attn_qkvpacked_func, qkv.to(torch.float8_e4m3fnuz), dropout_p, causal=causal, repeats=repeats, verbose=False
+FLASH_ATTENTION_TRITON_AMD_REMOVE_QUANT_SCALE=1
+"""
+for causal in causal_vals:
+    for headdim in headdim_vals:
+        for batch_size, seqlen in bs_seqlen_vals:
+            config = (causal, headdim, batch_size, seqlen)
+            nheads = dim // headdim
+            qkv = torch.randn(batch_size, seqlen, 3, nheads, headdim, device=device, dtype=dtype,
+                            requires_grad=True)
+            t_fp8 = time_fwd(
+                flash_attn_qkvpacked_func, qkv.to(torch.float8_e4m3fnuz), dropout_p, causal=causal, repeats=repeats, verbose=False
+            )
+            time_f[config, "Flash2_fp8"] = t_fp8
+
+            t_fp16 = time_fwd(
+                flash_attn_qkvpacked_func, qkv.to(torch.float16), dropout_p, causal=causal, repeats=repeats, verbose=False
+            )
+            time_f[config, "Flash2_fp16"] = t_fp16
+
+            print(f"\n### ENABLE_QUANTIZATION_SCALING={os.getenv('FLASH_ATTENTION_TRITON_AMD_REMOVE_QUANT_SCALE') != 1}, causal={causal}, headdim={headdim}, batch_size={batch_size}, seqlen={seqlen} ###")
+            for method in methods:
+                speed_f[config, method] = efficiency(
+                    flops(batch_size, seqlen, headdim, nheads, causal, mode="fwd"),
+                    time_f[config, method]
                 )
-                time_f[config, "Flash2_fp8"] = t_fp8
-
-                t_fp16 = time_fwd(
-                    flash_attn_qkvpacked_func, qkv.to(torch.float16), dropout_p, causal=causal, repeats=repeats, verbose=False
+                print(
+                    f"{method} fwd: {speed_f[config, method]:.2f} TFLOPs/s, "
                 )
-                time_f[config, "Flash2_fp16"] = t_fp16
-
-                print(f"### causal={causal}, headdim={headdim}, batch_size={batch_size}, seqlen={seqlen} ###")
-                for method in methods:
-                    speed_f[config, method] = efficiency(
-                        flops(batch_size, seqlen, headdim, nheads, causal, mode="fwd"),
-                        time_f[config, method]
-                    )
-                    print(
-                        f"{method} fwd: {speed_f[config, method]:.2f} TFLOPs/s, "
-                    )
 
 
 # with open('flash2_attn_time.plk', 'wb') as fp:
