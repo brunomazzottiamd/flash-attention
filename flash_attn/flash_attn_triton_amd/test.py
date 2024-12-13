@@ -390,7 +390,7 @@ def test_op_prefill_fwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropou
     if layout == "thd":
         q, k, v, metadata = varlen_input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, device=device, DEBUG_INPUT=DEBUG_INPUT)
     else:
-        q, k, v, q_fp32, k_fp32, v_fp32, metadata = input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout, device=device, DEBUG_INPUT=DEBUG_INPUT)
+        q, k, v, metadata = input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout, device=device, DEBUG_INPUT=DEBUG_INPUT)
     if DEBUG_INPUT:
         output_triton = torch.zeros_like(q).contiguous()
     else:
@@ -436,7 +436,7 @@ def test_op_prefill_fwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropou
                                                 metadata.use_exp2)
 
     output_ref, softmax_lse_ref, sd_mask_ref  = attention_forward_pytorch_ref_impl(
-        q_fp32, k_fp32, v_fp32,
+        q, k, v,
         metadata.sm_scale, 
         causal, 
         layout,

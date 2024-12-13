@@ -167,7 +167,6 @@ def input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout, device="cud
         v = torch.randn(k_tensor_shape, dtype=torch.float32, device=device, requires_grad=True)
 
     q, k, v = q.to(dtype), k.to(dtype), v.to(dtype)
-    q_fp32, k_fp32, v_fp32 = q.to(torch.float32), k.to(torch.float32), v.to(torch.float32)
     
     if DEBUG_INPUT:
         sm_scale = 1
@@ -177,7 +176,7 @@ def input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout, device="cud
     input_metadata.max_seqlens_q = N_CTX_Q
     input_metadata.max_seqlens_k = N_CTX_K
     input_metadata.layout = layout
-    return q, k, v, q_fp32, k_fp32, v_fp32, input_metadata
+    return q, k, v, input_metadata
 
 
 def varlen_input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, device="cuda", equal_seqlens=False, DEBUG_INPUT=False):

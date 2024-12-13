@@ -82,14 +82,11 @@ def _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stri
             k_offs_n = None
         k_offs_k = None if not PADDED_HEAD else tl.arange(0, BLOCK_DMODEL)
         k = load_fn(k_ptrs, k_offs_k, k_offs_n, ACTUAL_BLOCK_DMODEL, actual_seqlen_k)
-        if IS_FP8:
-            k = (k.to(tl.float16) / k_scale.to(tl.float16)).to(k.type.element_ty)
 
         if PRE_LOAD_V:
             # We can use the same offsets as k, just with dims transposed.
             v = load_fn(v_ptrs, k_offs_n, k_offs_k, actual_seqlen_k, ACTUAL_BLOCK_DMODEL)
-            if IS_FP8:
-                v = (v.to(tl.float16) / v_scale.to(tl.float16)).to(v.type.element_ty)
+            
         qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
         # We start from end of seqlen_k so only the first iteration would need
         # to be checked for padding if it is not a multiple of block_n
@@ -107,7 +104,7 @@ def _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stri
                 qk = tl.where(mask, qk, float("-inf"))
         
         # -- compute qk ----
-        qk += tl.dot(q, k)
+        qk += tl.dot(q.to(tl.float16), k.to(tl.float16))
         qk_scaled =  qk * SM_SCALE
         if IS_FP8:
             qk_scaled = qk_scaled * q_scale * k_scale # descale qk after matmul if quantized
@@ -173,17 +170,13 @@ def _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stri
         acc = acc * alpha[:, None]
         if not PRE_LOAD_V:
             v = load_fn(v_ptrs, k_offs_n, k_offs_k, actual_seqlen_k, ACTUAL_BLOCK_DMODEL)
-            if IS_FP8:
-                v = (v.to(tl.float16) / v_scale.to(tl.float16)).to(v.type.element_ty)
         # -- update m_i and l_i
         l_i = l_i * alpha + l_ij
         # update m_i and l_i
         m_i = m_ij
 
         if IS_FP8:
-            p_scale = 1 # NOTE: for proper scaling set this = tl.max(p) (increases error)
-            p_scaled = (p / p_scale)
-            acc += tl.dot(p_scaled.to(v.type.element_ty), v.to(v.type.element_ty)).to(tl.float32) * v_scale * p_scale # if you want to use p_scaled: tl.dot(p_scaled.to(v.type.element_ty), v.to(v.type.element_ty)) * v_scale * p_scale
+            acc += tl.dot(p.to(v.type.element_ty), v.to(v.type.element_ty)).to(tl.float32) * v_scale # if you want to use p_scaled: tl.dot(p_scaled.to(v.type.element_ty), v.to(v.type.element_ty)) * v_scale * p_scale
         else:
             # NOTE: if you make the below operation tl.float16 + set FLASH_ATTENTION_TRITON_AMD_REMOVE_QUANT_SCALE=1. It passes. --> acc += tl.dot(p.to(tl.float16), v.to(tl.float16)) PASSES
             acc += tl.dot(p.to(v.type.element_ty), v).to(tl.float32)
@@ -416,8 +409,6 @@ def attn_fwd(Q, K, V, bias, Q_SCALE, K_SCALE, V_SCALE, stride_qscale_z, stride_k
     # if IS FP8 get q_scale and quantize
     if IS_FP8:
         q_scale = tl.load(Q_SCALE + off_z*stride_qscale_z + off_h_q)
-        q = (q.to(tl.float16) / q_scale.to(tl.float16)).to(q.type.element_ty) # scale q by q_scale
-
         k_scale = tl.load(K_SCALE + off_z*stride_kvscale_z + off_h_k)
         v_scale = tl.load(V_SCALE + off_z*stride_kvscale_z + off_h_k)
     else:
@@ -570,12 +561,16 @@ def attention_prefill_forward_triton_impl(
     
     is_fp8 = check_is_fp8(q)
     
-    # if qkv are fp8, then find scaling factor for quantization
-    q_scale, k_scale, v_scale = create_scale_tensors(q, k, v, SCALE_PER_HEAD=True, layout=layout) # TODO: if SCALE_PER_HEAD: within the kernel itself just compute qkv_scale = tl.max(q or k or v)
-    q_scale_stride_z = q_scale.stride(0)
-    kv_scale_stride_z = k_scale.stride(0)
-
-    # import pdb; pdb.set_trace()
+    if is_fp8:
+        # if qkv are fp8, then find scaling factor for quantization
+        q_scale, k_scale, v_scale = create_scale_tensors(q, k, v, SCALE_PER_HEAD=True, layout=layout) # TODO: if SCALE_PER_HEAD: within the kernel itself just compute qkv_scale = tl.max(q or k or v)
+        q_scale_stride_z = q_scale.stride(0)
+        kv_scale_stride_z = k_scale.stride(0)
+        q = (q.to(torch.float32) / q_scale.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, q.shape[-2], q.shape[-1])).to(q.dtype)
+        k = (k.to(torch.float32) / k_scale.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, k.shape[-2], k.shape[-1])).to(k.dtype)
+        v = (v.to(torch.float32) / v_scale.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, v.shape[-2], v.shape[-1])).to(v.dtype)
+    else:
+        q_scale = k_scale = v_scale = 1
 
     if DEBUG:
         print()
@@ -660,8 +655,6 @@ def attention_prefill_forward_triton_impl(
         alibi_strides = (alibi_slopes.stride(0), alibi_slopes.stride(1))
     else:
         alibi_strides = (0, 0)
-
-    # import pdb; pdb.set_trace()
 
     attn_fwd[grid](q, k, v, bias, q_scale, k_scale, v_scale, q_scale_stride_z, kv_scale_stride_z, sm_scale, softmax_lse, o, *q_strides, *k_strides, *v_strides, *o_strides,
                     *bias_strides, *alibi_strides, *scores_strides, stride_lse_z, stride_lse_h, stride_lse_m, cu_seqlens_q, cu_seqlens_k,
