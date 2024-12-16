@@ -570,6 +570,7 @@ def attention_prefill_forward_triton_impl(
         k = (k.to(torch.float32) / k_scale.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, k.shape[-2], k.shape[-1])).to(k.dtype)
         v = (v.to(torch.float32) / v_scale.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, v.shape[-2], v.shape[-1])).to(v.dtype)
     else:
+        q_scale_stride_z = kv_scale_stride_z = 0
         q_scale = k_scale = v_scale = 1
 
     if DEBUG:
