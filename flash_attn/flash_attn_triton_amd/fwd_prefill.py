@@ -536,6 +536,13 @@ def attn_fwd(Q, K, V, bias, Q_SCALE, K_SCALE, V_SCALE, stride_qscale_z, stride_k
     tl.store(o_ptrs, acc.to(Out.dtype.element_ty), mask=o_ptrs_mask)
 
 
+def _scale_fp8(x, x_scale, layout):
+    assert layout in ["bhsd", "bshd"]
+    n = x.to(torch.float32)
+    d = x_scale[:, :, None, None] if layout == "bhsd" else x_scale[:, None, :, None]
+    return (n / d).to(x.dtype)
+
+
 def attention_prefill_forward_triton_impl(
                                         q,
                                         k,
@@ -566,11 +573,9 @@ def attention_prefill_forward_triton_impl(
         q_scale, k_scale, v_scale = create_scale_tensors(q, k, v, SCALE_PER_HEAD=True, layout=layout) # TODO: if SCALE_PER_HEAD: within the kernel itself just compute qkv_scale = tl.max(q or k or v)
         q_scale_stride_z = q_scale.stride(0)
         kv_scale_stride_z = k_scale.stride(0)
-        # FIXME: Scaling isn't working for "bshd" layout.
-        #        RuntimeError: The size of tensor a (x) must match the size of tensor b (y) at non-singleton dimension 1
-        q = (q.to(torch.float32) / q_scale.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, q.shape[-2], q.shape[-1])).to(q.dtype)
-        k = (k.to(torch.float32) / k_scale.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, k.shape[-2], k.shape[-1])).to(k.dtype)
-        v = (v.to(torch.float32) / v_scale.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, v.shape[-2], v.shape[-1])).to(v.dtype)
+        q = _scale_fp8(q, q_scale, layout)
+        k = _scale_fp8(k, k_scale, layout)
+        v = _scale_fp8(v, v_scale, layout)
     else:
         q_scale_stride_z = kv_scale_stride_z = 0
         q_scale = k_scale = v_scale = 1

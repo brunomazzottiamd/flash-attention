@@ -380,7 +380,7 @@ def test_op_bwd(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, torch_sdpa_test, use_ali
 )
 @pytest.mark.parametrize('causal', [False])  # FIXME: There are some mismatches for causal.
 @pytest.mark.parametrize('dropout_p', [0.0])
-@pytest.mark.parametrize('layout', ["bhsd"])
+@pytest.mark.parametrize('layout', ["bhsd", "bshd"])
 @pytest.mark.parametrize('use_exp2', [True, False])
 @pytest.mark.parametrize('dtype', [torch.float16, torch.float8_e4m3fnuz])
 @pytest.mark.parametrize('DEBUG_INPUT', [False])  # NOTE: debug input can overflow when the tensors are large. Just use to figure out issues.
