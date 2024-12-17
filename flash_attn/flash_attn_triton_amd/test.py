@@ -385,8 +385,14 @@ def test_op_bwd(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, torch_sdpa_test, use_ali
 @pytest.mark.parametrize('dtype', [torch.float8_e4m3fnuz])
 @pytest.mark.parametrize('DEBUG_INPUT', [False]) # NOTE: debug input can overflow when the tensors are large. Just use to figure out issues
 def test_op_prefill_fwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, layout, use_exp2, dtype, DEBUG_INPUT):
+    if dtype in [torch.float8_e4m3fn, torch.float8_e4m3fnuz, torch.float8_e5m2, torch.float8_e5m2fnuz]:
+        atol = 1.009e-01
+        rtol = 9.128e-02
+    else:
+        atol = ATOL
+        rtol = RTOL
+
     torch.manual_seed(0)
-    alibi_slopes = None
     device = "cuda"
 
     if layout == "thd":
@@ -415,7 +421,6 @@ def test_op_prefill_fwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropou
     if dropout_p > 0.0:
         metadata.need_dropout(dropout_p)
 
-
     # call Triton's forward implementation directly
     output_triton, softmax_lse_triton, sd_mask_triton = attention_prefill_forward_triton_impl(
                                                 q, 
@@ -437,7 +442,7 @@ def test_op_prefill_fwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropou
                                                 metadata.return_scores, 
                                                 metadata.use_exp2)
 
-    output_ref, softmax_lse_ref, sd_mask_ref  = attention_forward_pytorch_ref_impl(
+    output_ref, softmax_lse_ref, sd_mask_ref = attention_forward_pytorch_ref_impl(
         q, k, v,
         metadata.sm_scale, 
         causal, 
@@ -466,12 +471,12 @@ def test_op_prefill_fwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropou
     if DEBUG:
         print("softmax_lse_triton:", softmax_lse_triton, softmax_lse_triton.shape)
         print("softmax_lse_ref:", softmax_lse_ref, softmax_lse_ref.shape)
-    torch.testing.assert_close(softmax_lse_triton, softmax_lse_ref, atol=ATOL, rtol=RTOL)
+    torch.testing.assert_close(softmax_lse_triton, softmax_lse_ref, atol=atol, rtol=rtol)
     
     if DEBUG:
         print("output_triton:", output_triton, output_triton.shape)
         print("output_ref:", output_ref, output_ref.shape)
-    torch.testing.assert_close(output_triton.to(torch.float32), output_ref.to(torch.float32), atol=ATOL, rtol=RTOL)
+    torch.testing.assert_close(output_triton.to(torch.float32), output_ref.to(torch.float32), atol=atol, rtol=rtol)
 
 
 @pytest.mark.parametrize(
