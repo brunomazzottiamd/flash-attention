@@ -566,6 +566,8 @@ def attention_prefill_forward_triton_impl(
         q_scale, k_scale, v_scale = create_scale_tensors(q, k, v, SCALE_PER_HEAD=True, layout=layout) # TODO: if SCALE_PER_HEAD: within the kernel itself just compute qkv_scale = tl.max(q or k or v)
         q_scale_stride_z = q_scale.stride(0)
         kv_scale_stride_z = k_scale.stride(0)
+        # FIXME: Scaling isn't working for "bshd" layout.
+        #        RuntimeError: The size of tensor a (x) must match the size of tensor b (y) at non-singleton dimension 1
         q = (q.to(torch.float32) / q_scale.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, q.shape[-2], q.shape[-1])).to(q.dtype)
         k = (k.to(torch.float32) / k_scale.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, k.shape[-2], k.shape[-1])).to(k.dtype)
         v = (v.to(torch.float32) / v_scale.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, v.shape[-2], v.shape[-1])).to(v.dtype)
