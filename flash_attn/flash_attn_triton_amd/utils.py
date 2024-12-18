@@ -380,9 +380,9 @@ def create_scale_tensors(q, k, v, SCALE_PER_HEAD=False, layout='bshd'):
 
     is_varlen = layout == "thd"
 
-    # Handle float8 dtype special case
+    # Handle float8 dtype special case:
     if is_fp8:
-        # Convert to float32 for scale computation
+        # Convert to float32 for scale computation.
         q_float32 = q.to(torch.float32)
         k_float32 = k.to(torch.float32)
         v_float32 = v.to(torch.float32)
@@ -391,23 +391,38 @@ def create_scale_tensors(q, k, v, SCALE_PER_HEAD=False, layout='bshd'):
             if is_varlen:
                 assert False, "VARLEN NOT SUPPORTED FOR SCALE PER HEAD"
             else:
-                # Compute max for each batch-head pair
-                q_scale = q_float32.abs().amax(dim=(seqlen_loc, dim_loc))  # Shape: (BATCH, HEAD) - computes mas across seqlen and dim
+                # Compute max for each batch-head pair.
+                # Compute max across seqlen and dim.
+                q_scale = q_float32.abs().amax(dim=(seqlen_loc, dim_loc))  # Shape: (BATCH, HEAD)
                 k_scale = k_float32.abs().amax(dim=(seqlen_loc, dim_loc))  # Shape: (BATCH, HEAD)
                 v_scale = v_float32.abs().amax(dim=(seqlen_loc, dim_loc))  # Shape: (BATCH, HEAD)
         else:
-            # Compute global max and create a tensor of that value
+            # Compute global max and create a tensor of that value.
             q_global_max = q_float32.abs().max().item()
             k_global_max = k_float32.abs().max().item()
             v_global_max = v_float32.abs().max().item()
-            
-            # Create tensors filled with the global max
+
+            # Create tensors filled with the global max.
             batch, _, head, _ = q.shape
             q_scale = torch.full((batch, head), q_global_max, device=q.device)
             k_scale = torch.full((batch, head), k_global_max, device=k.device)
             v_scale = torch.full((batch, head), v_global_max, device=v.device)
+
+        # Divide max tensors by respective data type max.
+        dtype_max = {
+            dtype: torch.finfo(dtype).max
+            for dtype in [
+                torch.float8_e5m2,
+                torch.float8_e5m2fnuz,
+                torch.float8_e4m3fn,
+                torch.float8_e4m3fnuz,
+            ]
+        }
+        q_scale = q_scale / dtype_max[q.dtype]
+        k_scale = k_scale / dtype_max[k.dtype]
+        v_scale = v_scale / dtype_max[v.dtype]
     else:
-        # For non-float8 dtypes, use a default scale of 1
+        # For non-float8 dtypes, use a default scale of 1.
         if layout == 'bshd':
             batch, _, head, _ = q.shape
         elif layout == 'bhsd':
@@ -418,5 +433,4 @@ def create_scale_tensors(q, k, v, SCALE_PER_HEAD=False, layout='bshd'):
         k_scale = torch.ones((batch, head), device=k.device)
         v_scale = torch.ones((batch, head), device=v.device)
     
-    return q_scale*0.025, k_scale*0.025, v_scale*0.025
-
+    return q_scale, k_scale, v_scale
