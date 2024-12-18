@@ -176,11 +176,13 @@ def _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stri
         m_i = m_ij
 
         if IS_FP8:
-            acc += tl.dot(p.to(v.type.element_ty), v.to(v.type.element_ty)).to(tl.float32) * v_scale # if you want to use p_scaled: tl.dot(p_scaled.to(v.type.element_ty), v.to(v.type.element_ty)) * v_scale * p_scale
+            # if you want to use p_scaled: tl.dot(p_scaled.to(v.type.element_ty), v) * v_scale * p_scale
+            acc += tl.dot(p.to(v.type.element_ty), v).to(tl.float32) * v_scale
         else:
-            # NOTE: if you make the below operation tl.float16 + set FLASH_ATTENTION_TRITON_AMD_REMOVE_QUANT_SCALE=1. It passes. --> acc += tl.dot(p.to(tl.float16), v.to(tl.float16)) PASSES
+            # NOTE: if you make the below operation tl.float16 + set FLASH_ATTENTION_TRITON_AMD_REMOVE_QUANT_SCALE=1. It passes.
+            #       --> acc += tl.dot(p.to(tl.float16), v.to(tl.float16)) PASSES
             acc += tl.dot(p.to(v.type.element_ty), v).to(tl.float32)
-        
+
         k_ptrs += BLOCK_N * stride_kn
         v_ptrs += BLOCK_N * stride_vk
         if bias_ptrs is not None:
