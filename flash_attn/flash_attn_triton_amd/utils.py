@@ -403,10 +403,19 @@ def create_scale_tensors(q, k, v, SCALE_PER_HEAD=False, layout='bshd'):
             v_global_max = v_float32.abs().max().item()
 
             # Create tensors filled with the global max.
-            batch, _, head, _ = q.shape
-            q_scale = torch.full((batch, head), q_global_max, device=q.device)
-            k_scale = torch.full((batch, head), k_global_max, device=k.device)
-            v_scale = torch.full((batch, head), v_global_max, device=v.device)
+            if layout == "bshd":
+                batch_q, _, head_q, _ = q.shape
+                batch_k, _, head_k, _ = k.shape
+            elif layout == "bhsd":
+                batch_q, head_q, _, _ = q.shape
+                batch_k, head_k, _, _ = k.shape
+            elif layout == "thd":
+                # FIXME: varlen not working! ValueError: not enough values to unpack (expected 4, got 3)
+                pass
+            assert batch_q == batch_k
+            q_scale = torch.full((batch_q, head_q), q_global_max, device=q.device)
+            k_scale = torch.full((batch_k, head_k), k_global_max, device=k.device)
+            v_scale = torch.full((batch_k, head_k), v_global_max, device=v.device)
 
         # Divide max tensors by respective data type max.
         dtype_max = {
