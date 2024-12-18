@@ -380,11 +380,14 @@ def test_op_bwd(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, torch_sdpa_test, use_ali
 )
 @pytest.mark.parametrize('causal', [False])  # FIXME: There are some mismatches for causal.
 @pytest.mark.parametrize('dropout_p', [0.0])
-@pytest.mark.parametrize('layout', ["bhsd", "bshd"])
+@pytest.mark.parametrize('layout', ["bhsd", "bshd", "thd"])
 @pytest.mark.parametrize('use_exp2', [True, False])
 @pytest.mark.parametrize('dtype', [torch.float16, torch.float8_e4m3fnuz])
 @pytest.mark.parametrize('DEBUG_INPUT', [False])  # NOTE: debug input can overflow when the tensors are large. Just use to figure out issues.
 def test_op_prefill_fwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, layout, use_exp2, dtype, DEBUG_INPUT):
+    if layout == "thd" and dtype == torch.float8_e4m3fnuz:
+        pytest.skip("fp8 support for thd layout is under development.")
+
     if dtype in [torch.float8_e4m3fn, torch.float8_e4m3fnuz, torch.float8_e5m2, torch.float8_e5m2fnuz]:
         atol = 1.009e-01
         rtol = 9.128e-02
@@ -459,7 +462,7 @@ def test_op_prefill_fwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropou
 
     if DEBUG:
         print()
-        print("Compare Triton Impl with refernce Pytorch Impl")
+        print("Compare Triton Impl with reference Pytorch Impl")
 
     # this can be set to true manually or when using dropout
     if metadata.return_scores:

@@ -204,19 +204,21 @@ def varlen_input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, device="cuda
 
     if DEBUG_INPUT:
         # Initialize q, k, v with deterministic values
-        q = torch.arange(total_q, dtype=dtype, device=device).view(total_q, 1, 1)
+        q = torch.arange(total_q, dtype=torch.float32, device=device).view(total_q, 1, 1)
         q = q.expand(total_q, HQ, D_HEAD).contiguous().requires_grad_()
-        k = torch.arange(total_k, dtype=dtype, device=device).view(total_k, 1, 1)
+        k = torch.arange(total_k, dtype=torch.float32, device=device).view(total_k, 1, 1)
         k = k.expand(total_k, HK, D_HEAD).contiguous().requires_grad_()
-        v = torch.arange(total_k, dtype=dtype, device=device).view(total_k, 1, 1)
+        v = torch.arange(total_k, dtype=torch.float32, device=device).view(total_k, 1, 1)
         v = v.expand(total_k, HK, D_HEAD).contiguous().requires_grad_()
         sm_scale = 1
     else:
         # Initialize q, k, v with random values
-        q = torch.randn((total_q, HQ, D_HEAD), dtype=dtype, device=device).requires_grad_()
-        k = torch.randn((total_k, HK, D_HEAD), dtype=dtype, device=device).requires_grad_()
-        v = torch.randn((total_k, HK, D_HEAD), dtype=dtype, device=device).requires_grad_()
+        q = torch.randn((total_q, HQ, D_HEAD), dtype=torch.float32, device=device).requires_grad_()
+        k = torch.randn((total_k, HK, D_HEAD), dtype=torch.float32, device=device).requires_grad_()
+        v = torch.randn((total_k, HK, D_HEAD), dtype=torch.float32, device=device).requires_grad_()
         sm_scale = D_HEAD ** -0.5
+
+    q, k, v = q.to(dtype), k.to(dtype), v.to(dtype)
 
     input_metadata = MetaData(sm_scale=sm_scale)
     input_metadata.set_varlen_params(cu_seqlens_q, cu_seqlens_k)
@@ -341,6 +343,7 @@ def is_cdna():
 def is_rdna():
     return is_hip() and get_arch() in ("gfx1030", "gfx1100", "gfx1101", "gfx1102", "gfx1200", "gfx1201")
 
+
 def check_is_fp8(x: torch.Tensor):
     if REMOVE_QUANTIZATION_SCALING:
         return False # makes all methods believe they aren't working with fp8s, so no scaling is applied
@@ -353,7 +356,8 @@ def check_is_fp8(x: torch.Tensor):
     }
     return x.dtype in fp8_types
 
-def create_scale_tensors(q, k, v, SCALE_PER_HEAD=False, layout='bshd'):
+
+def create_scale_tensors(q, k, v, SCALE_PER_HEAD=False, layout='bshd', cu_seqlens_q=None, cu_seqlens_k=None):
     """
     Create scale tensors for q and k based on the scaling configuration.
     
@@ -386,9 +390,10 @@ def create_scale_tensors(q, k, v, SCALE_PER_HEAD=False, layout='bshd'):
         q_float32 = q.to(torch.float32)
         k_float32 = k.to(torch.float32)
         v_float32 = v.to(torch.float32)
-        
+
         if SCALE_PER_HEAD:
             if is_varlen:
+                # FIXME: varlen should be supported.
                 assert False, "VARLEN NOT SUPPORTED FOR SCALE PER HEAD"
             else:
                 # Compute max for each batch-head pair.
@@ -410,8 +415,12 @@ def create_scale_tensors(q, k, v, SCALE_PER_HEAD=False, layout='bshd'):
                 batch_q, head_q, _, _ = q.shape
                 batch_k, head_k, _, _ = k.shape
             elif layout == "thd":
-                # FIXME: varlen not working! ValueError: not enough values to unpack (expected 4, got 3)
-                pass
+                assert cu_seqlens_q is not None
+                batch_q = len(cu_seqlens_q) - 1
+                head_q = q.shape[1]
+                assert cu_seqlens_k is not None
+                batch_k = len(cu_seqlens_k) - 1
+                head_k = k.shape[1]
             assert batch_q == batch_k
             q_scale = torch.full((batch_q, head_q), q_global_max, device=q.device)
             k_scale = torch.full((batch_k, head_k), k_global_max, device=k.device)
@@ -437,6 +446,7 @@ def create_scale_tensors(q, k, v, SCALE_PER_HEAD=False, layout='bshd'):
         elif layout == 'bhsd':
             batch, head, _, _ = q.shape
         else:
+            # FIXME: varlen should be supported.
             assert False, "VARLEN NOT SUPPORTED"
         q_scale = torch.ones((batch, head), device=q.device)
         k_scale = torch.ones((batch, head), device=k.device)

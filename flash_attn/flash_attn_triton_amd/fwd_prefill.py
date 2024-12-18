@@ -539,9 +539,13 @@ def attn_fwd(Q, K, V, bias, Q_SCALE, K_SCALE, V_SCALE, stride_qscale_z, stride_k
 
 
 def _scale_fp8(x, x_scale, layout):
-    assert layout in ["bhsd", "bshd"]
     n = x.to(torch.float32)
-    d = x_scale[:, :, None, None] if layout == "bhsd" else x_scale[:, None, :, None]
+    if layout == "bhsd":
+        d = x_scale[:, :, None, None]
+    elif layout == "bshd":
+        d = x_scale[:, None, :, None]
+    elif layout == "thd":
+        pass  # TODO: Implement fp8 scaling fot thd layout.
     return (n / d).to(x.dtype)
 
 
@@ -567,12 +571,15 @@ def attention_prefill_forward_triton_impl(
                                         # misc
                                         return_softmax,
                                         use_exp2):
-    
+    is_varlen = layout == "thd"  # check if varlen
+    scale_per_head = not is_varlen  # use False to test global scaling for "bhsd" and "bshd" layouts
     is_fp8 = check_is_fp8(q)
-    
+
     if is_fp8:
         # if qkv are fp8, then find scaling factor for quantization
-        q_scale, k_scale, v_scale = create_scale_tensors(q, k, v, SCALE_PER_HEAD=True, layout=layout) # TODO: if SCALE_PER_HEAD: within the kernel itself just compute qkv_scale = tl.max(q or k or v)
+        # TODO: if SCALE_PER_HEAD: within the kernel itself just compute qkv_scale = tl.max(q or k or v)
+        q_scale, k_scale, v_scale = create_scale_tensors(q, k, v, SCALE_PER_HEAD=scale_per_head, layout=layout,
+                                                         cu_seqlens_q=cu_seqlens_q, cu_seqlens_k=cu_seqlens_k)
         q_scale_stride_z = q_scale.stride(0)
         kv_scale_stride_z = k_scale.stride(0)
         q = _scale_fp8(q, q_scale, layout)
@@ -606,11 +613,6 @@ def attention_prefill_forward_triton_impl(
         print("philox_offset:", philox_offset)
         print("return_scores:", return_softmax)
         print("use_exp2:", use_exp2)
-
-    # import pdb; pdb.set_trace()
-
-    # check if varlen
-    is_varlen = layout == "thd"
 
     # NOTE: a large bias tensor leads to overflow during pointer arithmetic
     if (bias is not None):
