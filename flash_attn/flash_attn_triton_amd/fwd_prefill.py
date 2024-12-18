@@ -104,8 +104,8 @@ def _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stri
                 qk = tl.where(mask, qk, float("-inf"))
         
         # -- compute qk ----
-        qk += tl.dot(q.to(tl.float16), k.to(tl.float16))
-        qk_scaled =  qk * SM_SCALE
+        qk += tl.dot(q, k)
+        qk_scaled = qk * SM_SCALE
         if IS_FP8:
             qk_scaled = qk_scaled * q_scale * k_scale # descale qk after matmul if quantized
         if IS_CAUSAL:
