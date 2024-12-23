@@ -63,7 +63,7 @@ def compute_alibi_block(alibi_slope, seqlen_q, seqlen_k, offs_m, offs_n, transpo
 def _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stride_vk, stride_bn, stride_sn, start_m,
                     actual_seqlen_k, actual_seqlen_q, dropout_p, philox_seed, philox_ptrs, sd_mask_ptrs, dropout_mask_ptrs,
                     block_min, block_max, offs_n_causal, masked_blocks, n_extra_tokens, alibi_slope,
-                    q_scale, k_scale, v_scale, IS_FP8: tl.constexpr,
+                    q_scale, k_scale, v_scale, p_scale, p_inv_scale, IS_FP8: tl.constexpr,
                     IS_CAUSAL: tl.constexpr, BLOCK_M: tl.constexpr, BLOCK_DMODEL: tl.constexpr, BLOCK_N: tl.constexpr,
                     OFFS_M: tl.constexpr, OFFS_N: tl.constexpr, PRE_LOAD_V: tl.constexpr, MASK_STEPS: tl.constexpr,
                     ENABLE_DROPOUT: tl.constexpr, PADDED_HEAD: tl.constexpr,
@@ -271,8 +271,10 @@ autotune_configs, autotune_keys = get_autotune_configs()
     use_cuda_graph=True,
 )
 @triton.jit
-def attn_fwd(Q, K, V, bias, Q_SCALE, K_SCALE, V_SCALE, stride_qscale_z, stride_kvscale_z, SM_SCALE: tl.constexpr, LSE, Out, stride_qz, stride_qh, stride_qm, stride_qk, 
-             stride_kz, stride_kh, stride_kn, stride_kk, stride_vz, stride_vh, stride_vk, stride_vn, 
+def attn_fwd(Q, K, V, bias,
+             Q_SCALE, K_SCALE, V_SCALE, P_SCALE, P_INV_SCALE, stride_qscale_z, stride_kvscale_z, stride_pscale_z, stride_pinvscale_z,
+             SM_SCALE: tl.constexpr, LSE, Out, stride_qz, stride_qh, stride_qm, stride_qk,
+             stride_kz, stride_kh, stride_kn, stride_kk, stride_vz, stride_vh, stride_vk, stride_vn,
              stride_oz, stride_oh, stride_om, stride_on, stride_bz, stride_bh, stride_bm, stride_bn, stride_az, stride_ah,
              stride_sz, stride_sh, stride_sm, stride_sn, stride_lse_z, stride_lse_h, stride_lse_m, cu_seqlens_q, cu_seqlens_k,
              dropout_p, philox_seed, philox_offset_base, sd_mask, dropout_mask, alibi_slopes,  HQ: tl.constexpr,
@@ -410,11 +412,14 @@ def attn_fwd(Q, K, V, bias, Q_SCALE, K_SCALE, V_SCALE, stride_qscale_z, stride_k
 
     # if IS FP8 get q_scale and quantize
     if IS_FP8:
-        q_scale = tl.load(Q_SCALE + off_z*stride_qscale_z + off_h_q)
-        k_scale = tl.load(K_SCALE + off_z*stride_kvscale_z + off_h_k)
-        v_scale = tl.load(V_SCALE + off_z*stride_kvscale_z + off_h_k)
+        q_scale = tl.load(Q_SCALE + off_z * stride_qscale_z + off_h_q)
+        k_scale = tl.load(K_SCALE + off_z * stride_kvscale_z + off_h_k)
+        v_scale = tl.load(V_SCALE + off_z * stride_kvscale_z + off_h_k)
+        # TODO: Which head offset is the correct one? Q or KV?
+        p_scale = tl.load(P_SCALE + off_z * stride_pscale_z + off_h_q)
+        p_inv_scale = tl.load(P_INV_SCALE + off_z * stride_pinvscale_z + off_h_q)
     else:
-        q_scale, k_scale, v_scale = 1.0, 1.0, 1.0
+        q_scale, k_scale, v_scale, p_scale, p_inv_scale = 1.0, 1.0, 1.0, 1.0, 1.0
 
     # Here we compute how many full and masked blocks we have.
     padded_block_k = n_extra_tokens != 0
@@ -441,7 +446,7 @@ def attn_fwd(Q, K, V, bias, Q_SCALE, K_SCALE, V_SCALE, stride_qscale_z, stride_k
                                         sd_mask_ptrs, dropout_mask_ptrs,
                                         # _, _, offs_n_causal, masked_blocks, n_extra_tokens, _
                                         block_min, block_max, 0, 0, 0, alibi_slope,
-                                        q_scale, k_scale, v_scale, IS_FP8,
+                                        q_scale, k_scale, v_scale, p_scale, p_inv_scale, IS_FP8,
                                         # IS_CAUSAL, ....
                                         False, BLOCK_M, BLOCK_DMODEL, BLOCK_N, offs_m, offs_n,
                                         # _, MASK_STEPS, ...
@@ -470,7 +475,7 @@ def attn_fwd(Q, K, V, bias, Q_SCALE, K_SCALE, V_SCALE, stride_qscale_z, stride_k
                                         start_m, seqlen_k, seqlen_q, dropout_p, philox_seed, philox_ptrs,
                                         sd_mask_ptrs, dropout_mask_ptrs, block_min, block_max, offs_n_causal, masked_blocks,
                                         n_extra_tokens, alibi_slope,
-                                        q_scale, k_scale, v_scale, IS_FP8,
+                                        q_scale, k_scale, v_scale, p_scale, p_inv_scale, IS_FP8,
                                         IS_CAUSAL, BLOCK_M, BLOCK_DMODEL, BLOCK_N, offs_m, offs_n,
                                         # _, MASK_STEPS, ...
                                         PRE_LOAD_V, True, ENABLE_DROPOUT, PADDED_HEAD,
@@ -583,19 +588,21 @@ def attention_prefill_forward_triton_impl(
     if is_fp8:
         # if qkv are fp8, then find scaling factor for quantization
         # TODO: if SCALE_PER_HEAD: within the kernel itself just compute qkv_scale = tl.max(q or k or v)
-        q_scale, k_scale, v_scale = create_scale_tensors(
+        q_scale, k_scale, v_scale, p_scale, p_inv_scale = create_scale_tensors(
             q, k, v, layout,
             cu_seqlens_q=cu_seqlens_q, cu_seqlens_k=cu_seqlens_k, max_seqlen_q=max_seqlens_q, max_seqlen_k=max_seqlens_k,
             scale_per_head=scale_per_head,
         )
         q_scale_stride_z = q_scale.stride(0)
         kv_scale_stride_z = k_scale.stride(0)
+        p_scale_stride_z = p_scale.stride(0)
+        p_inv_scale_stride_z = p_inv_scale.stride(0)
         q = _scale_fp8(q, q_scale, layout)
         k = _scale_fp8(k, k_scale, layout)
         v = _scale_fp8(v, v_scale, layout)
     else:
-        q_scale_stride_z = kv_scale_stride_z = 0
-        q_scale = k_scale = v_scale = 1
+        q_scale_stride_z = kv_scale_stride_z = p_scale_stride_z = p_inv_scale_stride_z = 0
+        q_scale = k_scale = v_scale = p_scale = p_inv_scale = 1
 
     if DEBUG:
         print()
@@ -604,9 +611,11 @@ def attention_prefill_forward_triton_impl(
         print("k:", k, k.shape)
         print("v:", v, v.shape)
         print("o:", o, o.shape)
-        print("q_scale", q_scale)
-        print("k_scale", k_scale)
-        print("v_scale", v_scale)
+        print("q_scale:", q_scale)
+        print("k_scale:", k_scale)
+        print("v_scale:", v_scale)
+        print("p_scale:", p_scale)
+        print("p_inv_scale:", p_inv_scale)
         print("sm_scale:", sm_scale)
         print("alibi_slopes:", alibi_slopes)
         print("causal:", causal)
@@ -676,14 +685,16 @@ def attention_prefill_forward_triton_impl(
     else:
         alibi_strides = (0, 0)
 
-    attn_fwd[grid](q, k, v, bias, q_scale, k_scale, v_scale, q_scale_stride_z, kv_scale_stride_z, sm_scale, softmax_lse, o, *q_strides, *k_strides, *v_strides, *o_strides,
-                    *bias_strides, *alibi_strides, *scores_strides, stride_lse_z, stride_lse_h, stride_lse_m, cu_seqlens_q, cu_seqlens_k,
-                    dropout_p=dropout_p, philox_seed=philox_seed, philox_offset_base=philox_offset, sd_mask=sd_mask, dropout_mask=dropout_mask, alibi_slopes=alibi_slopes, 
-                    HQ=nheads_q, HK=nheads_k, ACTUAL_BLOCK_DMODEL=head_size, MAX_SEQLENS_Q=max_seqlens_q,
-                    MAX_SEQLENS_K=max_seqlens_k, IS_CAUSAL=causal, VARLEN=is_varlen,
-                    BLOCK_DMODEL=padded_d_model, USE_BIAS=False if bias is None else True,
-                    USE_ALIBI=False if alibi_slopes is None else True, ENABLE_DROPOUT=dropout_p
-                    > 0.0, USE_EXP2=use_exp2, RETURN_SCORES=return_softmax, IS_FP8=is_fp8)
+    attn_fwd[grid](q, k, v, bias,
+                   q_scale, k_scale, v_scale, p_scale, p_inv_scale, q_scale_stride_z, kv_scale_stride_z, p_scale_stride_z, p_inv_scale_stride_z,
+                   sm_scale, softmax_lse, o, *q_strides, *k_strides, *v_strides, *o_strides,
+                   *bias_strides, *alibi_strides, *scores_strides, stride_lse_z, stride_lse_h, stride_lse_m, cu_seqlens_q, cu_seqlens_k,
+                   dropout_p=dropout_p, philox_seed=philox_seed, philox_offset_base=philox_offset, sd_mask=sd_mask, dropout_mask=dropout_mask, alibi_slopes=alibi_slopes,
+                   HQ=nheads_q, HK=nheads_k, ACTUAL_BLOCK_DMODEL=head_size, MAX_SEQLENS_Q=max_seqlens_q,
+                   MAX_SEQLENS_K=max_seqlens_k, IS_CAUSAL=causal, VARLEN=is_varlen,
+                   BLOCK_DMODEL=padded_d_model, USE_BIAS=False if bias is None else True,
+                   USE_ALIBI=False if alibi_slopes is None else True, ENABLE_DROPOUT=dropout_p > 0.0,
+                   USE_EXP2=use_exp2, RETURN_SCORES=return_softmax, IS_FP8=is_fp8)
 
     if DEBUG:
         print()

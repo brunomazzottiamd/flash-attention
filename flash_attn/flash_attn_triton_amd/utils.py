@@ -379,9 +379,12 @@ def create_scale_tensors(
                  division by zero while scaling. Defaults to 1e-9.
 
     Returns:
-    tuple: (q_scale, k_scale, v_scale) tensors
+    tuple: (q_scale, k_scale, v_scale, p_scale, p_inv_scale) tensors
     To perform fp8 quantization you should divide by scale factor (x_quant = x / x_scale).
     To perform fp8 dequantization, your should multiply by scale factor (x = x_quant * x_scale).
+    p_scale and p_inv_scale are related to intermediate FA computation
+    p = softmax(matmul(q, transpose(k))).
+    All scale tensors are float32 ones.
     """
     assert layout in ["bhsd", "bshd", "thd"], "Unknow layout."
     is_varlen = layout == "thd"
@@ -402,6 +405,9 @@ def create_scale_tensors(
         q_scale = torch.ones((batch, head_q), dtype=torch.float32, device=q.device)
         k_scale = torch.ones((batch, head_k), dtype=torch.float32, device=k.device)
         v_scale = torch.ones((batch, head_K), dtype=torch.float32, device=v.device)
+        # TODO: Which number of heads is the correct one? Q or KV?
+        p_scale = torch.ones((batch, head_q), dtype=torch.float32, device=p.device)
+        p_inv_scale = p_scale
 
     else:
         # Handle float8 dtype special case.
@@ -457,4 +463,9 @@ def create_scale_tensors(
         k_scale = k_scale / fp8_max[k.dtype]
         v_scale = v_scale / fp8_max[v.dtype]
 
-    return q_scale, k_scale, v_scale
+        # Compute p_scale.
+        # TODO: Which number of heads is the correct one? Q or KV?
+        p_scale = torch.full((batch, head_q), fp8_max[q.dtype], dtype=torch.float32, device="cuda")
+        p_inv_scale = 1 / p_scale
+
+    return q_scale, k_scale, v_scale, p_scale, p_inv_scale
