@@ -465,7 +465,7 @@ def create_scale_tensors(
 
         # Compute p_scale.
         # TODO: Which number of heads is the correct one? Q or KV?
-        p_scale = torch.full((batch, head_q), fp8_max[q.dtype], dtype=torch.float32, device="cuda")
+        p_scale = torch.full((batch, head_q), 1 / fp8_max[q.dtype], dtype=torch.float32, device="cuda")
         p_inv_scale = 1 / p_scale
 
     return q_scale, k_scale, v_scale, p_scale, p_inv_scale

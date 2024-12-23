@@ -107,7 +107,7 @@ def _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stri
         qk += tl.dot(q, k)
         qk_scaled = qk * SM_SCALE
         if IS_FP8:
-            qk_scaled = qk_scaled * q_scale * k_scale # descale qk after matmul if quantized
+            qk_scaled *= q_scale * k_scale # descale qk after matmul if quantized
         if IS_CAUSAL:
             causal_boundary = start_n + offs_n_causal
             causal_mask = OFFS_M[:, None] >= causal_boundary[None, :]
@@ -177,7 +177,7 @@ def _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stri
 
         if IS_FP8:
             # if you want to use p_scaled: tl.dot(p_scaled.to(v.type.element_ty), v) * v_scale * p_scale
-            acc += tl.dot(p.to(v.type.element_ty), v).to(tl.float32) * v_scale
+            acc += (tl.dot((p * p_inv_scale).to(v.type.element_ty), v) * p_scale * v_scale).to(tl.float32)
         else:
             # NOTE: if you make the below operation tl.float16 + set FLASH_ATTENTION_TRITON_AMD_REMOVE_QUANT_SCALE=1. It passes.
             #       --> acc += tl.dot(p.to(tl.float16), v.to(tl.float16)) PASSES
