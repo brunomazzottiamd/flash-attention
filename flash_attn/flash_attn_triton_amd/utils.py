@@ -413,9 +413,9 @@ def create_scale_tensors(
         # Handle float8 dtype special case.
 
         # Convert to float32 for scale computation.
-        q_float32 = q.to(torch.float32)
-        k_float32 = k.to(torch.float32)
-        v_float32 = v.to(torch.float32)
+        q_float32 = q.detach().to(torch.float32)
+        k_float32 = k.detach().to(torch.float32)
+        v_float32 = v.detach().to(torch.float32)
 
         if not scale_per_head:
             # Handle global scaling.
@@ -445,9 +445,10 @@ def create_scale_tensors(
 
             # Compute max for each batch-head pair.
             # Compute max across seqlen and dim.
-            q_scale = q_float32.abs().amax(dim=(seqlen_loc, dim_loc))  # Shape: (BATCH, HEAD)
-            k_scale = k_float32.abs().amax(dim=(seqlen_loc, dim_loc))  # Shape: (BATCH, HEAD)
-            v_scale = v_float32.abs().amax(dim=(seqlen_loc, dim_loc))  # Shape: (BATCH, HEAD)
+            eps = torch.tensor(eps)
+            q_scale = torch.maximum(q_float32.abs().amax(dim=(seqlen_loc, dim_loc)), eps)  # Shape: (BATCH, HEAD)
+            k_scale = torch.maximum(k_float32.abs().amax(dim=(seqlen_loc, dim_loc)), eps)  # Shape: (BATCH, HEAD)
+            v_scale = torch.maximum(v_float32.abs().amax(dim=(seqlen_loc, dim_loc)), eps)  # Shape: (BATCH, HEAD)
 
         # Divide max tensors by respective data type max.
         fp8_max = {
