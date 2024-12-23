@@ -404,9 +404,9 @@ def create_scale_tensors(
         # For non-float8 dtypes, use a default scale of 1.
         q_scale = torch.ones((batch, head_q), dtype=torch.float32, device=q.device)
         k_scale = torch.ones((batch, head_k), dtype=torch.float32, device=k.device)
-        v_scale = torch.ones((batch, head_K), dtype=torch.float32, device=v.device)
+        v_scale = torch.ones((batch, head_k), dtype=torch.float32, device=v.device)
         # TODO: Which number of heads is the correct one? Q or KV?
-        p_scale = torch.ones((batch, head_q), dtype=torch.float32, device=p.device)
+        p_scale = torch.ones((batch, head_q), dtype=torch.float32, device="cuda")
         p_inv_scale = p_scale
 
     else:
