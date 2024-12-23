@@ -388,6 +388,7 @@ def test_op_prefill_fwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropou
     if layout == "thd" and dtype == torch.float8_e4m3fnuz:
         pytest.skip("fp8 support for thd layout is under development.")
 
+    # TODO: fp8 error tolerance must not be tweaked.
     if dtype in [torch.float8_e4m3fn, torch.float8_e4m3fnuz, torch.float8_e5m2, torch.float8_e5m2fnuz]:
         atol = 1.009e-01
         rtol = 9.128e-02

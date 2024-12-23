@@ -539,14 +539,19 @@ def attn_fwd(Q, K, V, bias, Q_SCALE, K_SCALE, V_SCALE, stride_qscale_z, stride_k
 
 
 def _scale_fp8(x, x_scale, layout):
+    # Fraction numerator is float32 version of x.
     n = x.to(torch.float32)
+    # Fraction denominator is the broadcasted scaled factor.
     if layout == "bhsd":
         d = x_scale[:, :, None, None]
     elif layout == "bshd":
         d = x_scale[:, None, :, None]
     elif layout == "thd":
-        pass  # TODO: Implement fp8 scaling fot thd layout.
-    return (n / d).to(x.dtype)
+        # TODO: Implement fp8 scaling for "thd" layout.
+        assert False, "varlen layout is still not supported."
+    # Perform scaling in float32 and convert back to float8.
+    x_scaled = torch.clamp(n / d, min=torch.finfo(x.dtype).min, max=torch.finfo(x.dtype).max)
+    return x_scaled.to(x.dtype)
 
 
 def attention_prefill_forward_triton_impl(
@@ -578,8 +583,11 @@ def attention_prefill_forward_triton_impl(
     if is_fp8:
         # if qkv are fp8, then find scaling factor for quantization
         # TODO: if SCALE_PER_HEAD: within the kernel itself just compute qkv_scale = tl.max(q or k or v)
-        q_scale, k_scale, v_scale = create_scale_tensors(q, k, v, SCALE_PER_HEAD=scale_per_head, layout=layout,
-                                                         cu_seqlens_q=cu_seqlens_q, cu_seqlens_k=cu_seqlens_k)
+        q_scale, k_scale, v_scale = create_scale_tensors(
+            q, k, v, layout,
+            cu_seqlens_q=cu_seqlens_q, cu_seqlens_k=cu_seqlens_k, max_seqlen_q=max_seqlens_q, max_seqlen_k=max_seqlens_k,
+            scale_per_head=scale_per_head,
+        )
         q_scale_stride_z = q_scale.stride(0)
         kv_scale_stride_z = k_scale.stride(0)
         q = _scale_fp8(q, q_scale, layout)

@@ -357,77 +357,94 @@ def check_is_fp8(x: torch.Tensor):
     return x.dtype in fp8_types
 
 
-def create_scale_tensors(q, k, v, SCALE_PER_HEAD=False, layout='bshd', cu_seqlens_q=None, cu_seqlens_k=None):
+def create_scale_tensors(
+    q, k, v, layout,
+    cu_seqlens_q=None, cu_seqlens_k=None, max_seqlen_q=None, max_seqlen_k=None,
+    scale_per_head=False, eps=1e-9
+):
     """
-    Create scale tensors for q and k based on the scaling configuration.
-    
+    Create scale tensors for q, k and v based on the scaling configuration.
+
     Args:
-    q (torch.Tensor): Query tensor
-    k (torch.Tensor): Key tensor
-    v (torch.Tensor): Value tensor
-    SCALE_PER_HEAD (bool): Whether to compute scale per head or globally
-    
+    q (torch.Tensor): Query tensor.
+    k (torch.Tensor): Key tensor.
+    v (torch.Tensor): Value tensor.
+    layout (str): Tensor layout, can be "bhsd", "bshd" or "thd".
+    cu_seqlens_q (?): Used with "thd" varlen layout.
+    cu_seqlens_k (?): Used with "thd" varlen layout.
+    max_seqlen_q (?): Used with "thd" varlen layout.
+    max_seqlen_k (?): Used with "thd" varlen layout.
+    scale_per_head (bool): Whether to compute scale per head or globally. Defaults to False.
+    eps (float): If the maximum absolute value of a tensor is zero, this contant avoids
+                 division by zero while scaling. Defaults to 1e-9.
+
     Returns:
     tuple: (q_scale, k_scale, v_scale) tensors
+    To perform fp8 quantization you should divide by scale factor (x_quant = x / x_scale).
+    To perform fp8 dequantization, your should multiply by scale factor (x = x_quant * x_scale).
     """
-    is_fp8 = check_is_fp8(q)
-
-    if layout == 'bhsd':
-        seqlen_loc = 2
-        dim_loc = 3
-    elif layout == 'bshd':
-        seqlen_loc = 1
-        dim_loc = 3
-    else:
-        # is varlen
-        pass
-
+    assert layout in ["bhsd", "bshd", "thd"], "Unknow layout."
     is_varlen = layout == "thd"
+    if is_varlen:
+        assert cu_seqlens_q is not None, "cu_seqlens_q is required for varlen layout."
+        assert cu_seqlens_k is not None, "cu_seqlens_k is required for varlen layout."
+        assert max_seqlen_q is not None, "max_seqlen_q is required for varlen layout."
+        assert max_seqlen_k is not None, "max_seqlen_k is required for varlen layout."
 
-    # Handle float8 dtype special case:
-    if is_fp8:
+    is_fp8 = check_is_fp8(q) or check_is_fp8(k) or check_is_fp8(v)
+    batch, head_q, head_k, head_size, max_seqlen_q, max_seqlen_k = get_shape_from_layout(
+        q, k, layout,
+        cu_seqlens_q=cu_seqlens_q, cu_seqlens_k=cu_seqlens_k, max_seqlen_q=max_seqlen_q, max_seqlen_k=max_seqlen_k,
+    )
+
+    if not is_fp8:
+        # For non-float8 dtypes, use a default scale of 1.
+        q_scale = torch.ones((batch, head_q), dtype=torch.float32, device=q.device)
+        k_scale = torch.ones((batch, head_k), dtype=torch.float32, device=k.device)
+        v_scale = torch.ones((batch, head_K), dtype=torch.float32, device=v.device)
+
+    else:
+        # Handle float8 dtype special case.
+
         # Convert to float32 for scale computation.
         q_float32 = q.to(torch.float32)
         k_float32 = k.to(torch.float32)
         v_float32 = v.to(torch.float32)
 
-        if SCALE_PER_HEAD:
-            if is_varlen:
-                # FIXME: varlen should be supported.
-                assert False, "VARLEN NOT SUPPORTED FOR SCALE PER HEAD"
-            else:
-                # Compute max for each batch-head pair.
-                # Compute max across seqlen and dim.
-                q_scale = q_float32.abs().amax(dim=(seqlen_loc, dim_loc))  # Shape: (BATCH, HEAD)
-                k_scale = k_float32.abs().amax(dim=(seqlen_loc, dim_loc))  # Shape: (BATCH, HEAD)
-                v_scale = v_float32.abs().amax(dim=(seqlen_loc, dim_loc))  # Shape: (BATCH, HEAD)
-        else:
-            # Compute global max and create a tensor of that value.
-            q_global_max = q_float32.abs().max().item()
-            k_global_max = k_float32.abs().max().item()
-            v_global_max = v_float32.abs().max().item()
+        if not scale_per_head:
+            # Handle global scaling.
 
-            # Create tensors filled with the global max.
-            if layout == "bshd":
-                batch_q, _, head_q, _ = q.shape
-                batch_k, _, head_k, _ = k.shape
-            elif layout == "bhsd":
-                batch_q, head_q, _, _ = q.shape
-                batch_k, head_k, _, _ = k.shape
-            elif layout == "thd":
-                assert cu_seqlens_q is not None
-                batch_q = len(cu_seqlens_q) - 1
-                head_q = q.shape[1]
-                assert cu_seqlens_k is not None
-                batch_k = len(cu_seqlens_k) - 1
-                head_k = k.shape[1]
-            assert batch_q == batch_k
-            q_scale = torch.full((batch_q, head_q), q_global_max, device=q.device)
-            k_scale = torch.full((batch_k, head_k), k_global_max, device=k.device)
-            v_scale = torch.full((batch_k, head_k), v_global_max, device=v.device)
+            # Compute global max and create a tensor of that value.
+            q_global_max = max(q_float32.abs().max().item(), eps)
+            k_global_max = max(k_float32.abs().max().item(), eps)
+            v_global_max = max(v_float32.abs().max().item(), eps)
+
+            q_scale = torch.full((batch, head_q), q_global_max, dtype=torch.float32, device=q.device)
+            k_scale = torch.full((batch, head_k), k_global_max, dtype=torch.float32, device=k.device)
+            v_scale = torch.full((batch, head_k), v_global_max, dtype=torch.float32, device=v.device)
+
+        else:
+            # Handle per batch / head scaling.
+
+            if is_varlen:
+                # TODO: varlen should be supported.
+                assert False, "varlen layout is still not supported for scale per head."
+
+            if layout == "bhsd":
+                seqlen_loc = 2
+                dim_loc = 3
+            elif layout == "bshd":
+                seqlen_loc = 1
+                dim_loc = 3
+
+            # Compute max for each batch-head pair.
+            # Compute max across seqlen and dim.
+            q_scale = q_float32.abs().amax(dim=(seqlen_loc, dim_loc))  # Shape: (BATCH, HEAD)
+            k_scale = k_float32.abs().amax(dim=(seqlen_loc, dim_loc))  # Shape: (BATCH, HEAD)
+            v_scale = v_float32.abs().amax(dim=(seqlen_loc, dim_loc))  # Shape: (BATCH, HEAD)
 
         # Divide max tensors by respective data type max.
-        dtype_max = {
+        fp8_max = {
             dtype: torch.finfo(dtype).max
             for dtype in [
                 torch.float8_e5m2,
@@ -436,20 +453,8 @@ def create_scale_tensors(q, k, v, SCALE_PER_HEAD=False, layout='bshd', cu_seqlen
                 torch.float8_e4m3fnuz,
             ]
         }
-        q_scale = q_scale / dtype_max[q.dtype]
-        k_scale = k_scale / dtype_max[k.dtype]
-        v_scale = v_scale / dtype_max[v.dtype]
-    else:
-        # For non-float8 dtypes, use a default scale of 1.
-        if layout == 'bshd':
-            batch, _, head, _ = q.shape
-        elif layout == 'bhsd':
-            batch, head, _, _ = q.shape
-        else:
-            # FIXME: varlen should be supported.
-            assert False, "VARLEN NOT SUPPORTED"
-        q_scale = torch.ones((batch, head), device=q.device)
-        k_scale = torch.ones((batch, head), device=k.device)
-        v_scale = torch.ones((batch, head), device=v.device)
-    
+        q_scale = q_scale / fp8_max[q.dtype]
+        k_scale = k_scale / fp8_max[k.dtype]
+        v_scale = v_scale / fp8_max[v.dtype]
+
     return q_scale, k_scale, v_scale
