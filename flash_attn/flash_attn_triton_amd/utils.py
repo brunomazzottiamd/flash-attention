@@ -395,7 +395,7 @@ def create_scale_tensors(
         assert max_seqlen_k is not None, "max_seqlen_k is required for varlen layout."
 
     is_fp8 = check_is_fp8(q) or check_is_fp8(k) or check_is_fp8(v)
-    batch, head_q, head_k, head_size, max_seqlen_q, max_seqlen_k = get_shape_from_layout(
+    batch, head_q, head_k, _, _, _ = get_shape_from_layout(
         q, k, layout,
         cu_seqlens_q=cu_seqlens_q, cu_seqlens_k=cu_seqlens_k, max_seqlen_q=max_seqlen_q, max_seqlen_k=max_seqlen_k,
     )
@@ -431,24 +431,26 @@ def create_scale_tensors(
 
         else:
             # Handle per batch / head scaling.
+            eps = torch.tensor(eps)
 
             if is_varlen:
-                # TODO: varlen should be supported.
-                assert False, "varlen layout is still not supported for scale per head."
+                q_scale = torch.stack([torch.maximum(q_float32[s:e].abs().amax(dim=(0, 2)), eps) for s, e in zip(cu_seqlens_q[:-1], cu_seqlens_q[1:])])
+                k_scale = torch.stack([torch.maximum(k_float32[s:e].abs().amax(dim=(0, 2)), eps) for s, e in zip(cu_seqlens_k[:-1], cu_seqlens_k[1:])])
+                v_scale = torch.stack([torch.maximum(v_float32[s:e].abs().amax(dim=(0, 2)), eps) for s, e in zip(cu_seqlens_k[:-1], cu_seqlens_k[1:])])
 
-            if layout == "bhsd":
-                seqlen_loc = 2
-                dim_loc = 3
-            elif layout == "bshd":
-                seqlen_loc = 1
-                dim_loc = 3
+            else:
+                if layout == "bhsd":
+                    seqlen_loc = 2
+                    dim_loc = 3
+                elif layout == "bshd":
+                    seqlen_loc = 1
+                    dim_loc = 3
 
-            # Compute max for each batch-head pair.
-            # Compute max across seqlen and dim.
-            eps = torch.tensor(eps)
-            q_scale = torch.maximum(q_float32.abs().amax(dim=(seqlen_loc, dim_loc)), eps)  # Shape: (BATCH, HEAD)
-            k_scale = torch.maximum(k_float32.abs().amax(dim=(seqlen_loc, dim_loc)), eps)  # Shape: (BATCH, HEAD)
-            v_scale = torch.maximum(v_float32.abs().amax(dim=(seqlen_loc, dim_loc)), eps)  # Shape: (BATCH, HEAD)
+                # Compute max for each batch-head pair.
+                # Compute max across seqlen and dim.
+                q_scale = torch.maximum(q_float32.abs().amax(dim=(seqlen_loc, dim_loc)), eps)  # Shape: (BATCH, HEAD)
+                k_scale = torch.maximum(k_float32.abs().amax(dim=(seqlen_loc, dim_loc)), eps)  # Shape: (BATCH, HEAD)
+                v_scale = torch.maximum(v_float32.abs().amax(dim=(seqlen_loc, dim_loc)), eps)  # Shape: (BATCH, HEAD)
 
         # Divide max tensors by respective data type max.
         fp8_max = {

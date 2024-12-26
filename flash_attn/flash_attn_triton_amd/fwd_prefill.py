@@ -580,9 +580,10 @@ def attention_prefill_forward_triton_impl(
                                         philox_offset,
                                         # misc
                                         return_softmax,
-                                        use_exp2):
+                                        use_exp2,
+                                        # fp8 scaling
+                                        scale_per_head=True):
     is_varlen = layout == "thd"  # check if varlen
-    scale_per_head = not is_varlen  # use False to test global scaling for "bhsd" and "bshd" layouts
     is_fp8 = check_is_fp8(q)
 
     if is_fp8:
