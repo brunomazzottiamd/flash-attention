@@ -543,20 +543,24 @@ def attn_fwd(Q, K, V, bias,
     tl.store(o_ptrs, acc.to(Out.dtype.element_ty), mask=o_ptrs_mask)
 
 
-def _scale_fp8(x, x_scale, layout):
+@torch.no_grad()
+def _scale_fp8(x, x_scale, layout, cu_seqlens=None):
+    assert layout in ["bhsd", "bshd", "thd"], "Unknow layout."
+    assert (layout == "thd" and cu_seqlens is not None) or layout != "thd", "cu_seqlens is required for varlen layout."
     # Fraction numerator is float32 version of x.
     n = x.to(torch.float32)
     # Fraction denominator is the broadcasted scaled factor.
     if layout == "bhsd":
-        d = x_scale[:, :, None, None]
+        x_scaled = n / x_scale[:, :, None, None]
     elif layout == "bshd":
-        d = x_scale[:, None, :, None]
+        x_scaled = n / x_scale[:, None, :, None]
     elif layout == "thd":
-        # TODO: Implement fp8 scaling for "thd" layout.
-        assert False, "varlen layout is still not supported."
-    # Perform scaling in float32 and convert back to float8.
-    x_scaled = torch.clamp(n / d, min=torch.finfo(x.dtype).min, max=torch.finfo(x.dtype).max)
-    return x_scaled.to(x.dtype)
+        x_scaled = torch.cat([
+            n[s:e] / x_scale[z, :].unsqueeze(0).unsqueeze(-1)
+            for z, (s, e) in enumerate(zip(cu_seqlens[:-1], cu_seqlens[1:]))
+        ], dim=0)
+    # Clamp and convert back to float8.
+    return torch.clamp(x_scaled, min=torch.finfo(x.dtype).min, max=torch.finfo(x.dtype).max).to(x.dtype)
 
 
 def attention_prefill_forward_triton_impl(
@@ -598,9 +602,9 @@ def attention_prefill_forward_triton_impl(
         kv_scale_stride_z = k_scale.stride(0)
         p_scale_stride_z = p_scale.stride(0)
         p_inv_scale_stride_z = p_inv_scale.stride(0)
-        q = _scale_fp8(q, q_scale, layout)
-        k = _scale_fp8(k, k_scale, layout)
-        v = _scale_fp8(v, v_scale, layout)
+        q = _scale_fp8(q, q_scale, layout, cu_seqlens=cu_seqlens_q)
+        k = _scale_fp8(k, k_scale, layout, cu_seqlens=cu_seqlens_k)
+        v = _scale_fp8(v, v_scale, layout, cu_seqlens=cu_seqlens_k)
     else:
         q_scale_stride_z = kv_scale_stride_z = p_scale_stride_z = p_inv_scale_stride_z = 0
         q_scale = k_scale = v_scale = p_scale = p_inv_scale = 1
