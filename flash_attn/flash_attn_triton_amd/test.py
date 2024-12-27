@@ -506,14 +506,17 @@ def test_op_prefill_fwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropou
         (4, 6, 6, 2048, 2048, 32),
     ],
 )
-@pytest.mark.parametrize('causal', [True, False])  # FIXME: There are some mismatches for causal.
-@pytest.mark.parametrize('dropout_p', [0.0])
-@pytest.mark.parametrize('layout', ["bhsd", "bshd", "thd"])
-@pytest.mark.parametrize('use_exp2', [True, False])
-@pytest.mark.parametrize('input_dtype', [torch.float8_e4m3fnuz])
-@pytest.mark.parametrize('output_dtype', [torch.float32])
-@pytest.mark.parametrize('DEBUG_INPUT', [False])  # NOTE: debug input can overflow when the tensors are large. Just use to figure out issues.
-def test_op_prefill_fwd_impl_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, layout, use_exp2, input_dtype, output_dtype, DEBUG_INPUT):
+@pytest.mark.parametrize("causal", [True, False])  # FIXME: There are some mismatches for causal.
+@pytest.mark.parametrize("dropout_p", [0.0])
+@pytest.mark.parametrize("layout", ["bhsd", "bshd", "thd"])
+@pytest.mark.parametrize("use_exp2", [True, False])
+@pytest.mark.parametrize("scale_per_head", [True, False])
+@pytest.mark.parametrize("input_dtype", [torch.float8_e4m3fnuz])
+@pytest.mark.parametrize("output_dtype", [torch.float32])
+@pytest.mark.parametrize("DEBUG_INPUT", [False])  # NOTE: debug input can overflow when the tensors are large. Just use to figure out issues.
+def test_op_prefill_fwd_impl_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD,
+                                 causal, dropout_p, layout, use_exp2, scale_per_head,
+                                 input_dtype, output_dtype, DEBUG_INPUT):
     # TODO: fp8 error tolerance must not be tweaked.
     atol = 1.009e-01
     rtol = 9.128e-02
@@ -565,6 +568,7 @@ def test_op_prefill_fwd_impl_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dr
         metadata.philox_offset,
         metadata.return_scores,
         metadata.use_exp2,
+        scale_per_head=scale_per_head,
     )
 
     output_ref, softmax_lse_ref, sd_mask_ref = attention_forward_pytorch_ref_impl(
