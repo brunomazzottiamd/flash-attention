@@ -25,7 +25,7 @@ def attention_forward_core_ref_impl(q, k, v, sm_scale, causal, dropout_p, philox
     v = v.to(torch.float32)
     
     # Compute attention scores
-    attention_scores = torch.matmul(q.to(torch.float32), k.transpose(-2, -1).to(torch.float32))
+    attention_scores = torch.matmul(q, k.transpose(-2, -1))
     if DEBUG_CORE:
         print("attention_scores:", attention_scores, attention_scores.shape)
 
