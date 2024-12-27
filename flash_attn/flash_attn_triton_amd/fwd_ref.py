@@ -4,8 +4,8 @@ from .utils import create_scale_tensors, check_is_fp8, DEBUG
 
 DEBUG_CORE = False
 
-def attention_forward_core_ref_impl(q, k, v, sm_scale, causal, layout, dropout_p, philox_seed, philox_offset, use_exp2, is_fp8):
-    
+def attention_forward_core_ref_impl(q, k, v, sm_scale, causal, dropout_p, philox_seed, philox_offset, use_exp2,
+                                    output_dtype=torch.float16):
     if DEBUG_CORE:
         print()
         print("attention_forward_core_ref_impl")
@@ -18,8 +18,6 @@ def attention_forward_core_ref_impl(q, k, v, sm_scale, causal, layout, dropout_p
         print("philox_seed:", philox_seed)
         print("philox_offset:", philox_offset)
         print("use_exp2:", use_exp2)
-        print('layout:', layout)
-        print('is_fp8:', is_fp8)
 
     # cast to float32
     q = q.to(torch.float32)
@@ -136,14 +134,16 @@ def attention_forward_core_ref_impl(q, k, v, sm_scale, causal, layout, dropout_p
     if DEBUG_CORE:
         print("o:", o, o.shape)
 
-    # cast back to original dtype
-    o = o.to(torch.float16)
-    # softmax_lse = softmax_lse.to(torch.float16) # NOTE: if you cast lse to fp16 it cause accuracy issues. keep fp32
-    sd_mask = sd_mask.to(torch.float16)
+    # cast to desired output dtype
+    o = o.to(output_dtype)
+    # softmax_lse = softmax_lse.to(output_dtype) # NOTE: if you cast lse to fp16 it cause accuracy issues. keep fp32
+    sd_mask = sd_mask.to(output_dtype)
 
     return o, softmax_lse, sd_mask
 
-def attention_vanilla_forward_pytorch_ref_impl(q, k, v, sm_scale, causal, layout, dropout_p, philox_seed, philox_offset, use_exp2, is_fp8):
+
+def attention_vanilla_forward_pytorch_ref_impl(q, k, v, sm_scale, causal, layout, dropout_p, philox_seed, philox_offset, use_exp2,
+                                               output_dtype=torch.float16):
     """Compute reference output and softmax_lse using PyTorch's built-in function"""
 
     # Ensure the layout is 'bhsd'
@@ -179,7 +179,8 @@ def attention_vanilla_forward_pytorch_ref_impl(q, k, v, sm_scale, causal, layout
 
     # Call the core attention function
     o, softmax_lse, sd_mask = attention_forward_core_ref_impl(
-        q, k, v, sm_scale, causal, layout, dropout_p, philox_seed, philox_offset, use_exp2, is_fp8
+        q, k, v, sm_scale, causal, dropout_p, philox_seed, philox_offset, use_exp2,
+        output_dtype=output_dtype,
     )
 
     if group_size != 1:
@@ -218,7 +219,7 @@ def attention_varlen_forward_pytorch_ref_impl(
     philox_seed, 
     philox_offset,
     use_exp2,
-    is_fp8
+    output_dtype=torch.float16,
 ):
     # Ensure the layout is 'thd'
     if layout != 'thd':
@@ -282,7 +283,10 @@ def attention_varlen_forward_pytorch_ref_impl(
             v_i = v_i.reshape(nheads_k, seqlen_k, head_dim)
 
         # Call the core attention function for this sequence
-        o_i, softmax_lse_i, sd_mask_i = attention_forward_core_ref_impl(q_i, k_i, v_i, sm_scale, causal, layout, dropout_p, philox_seed, philox_offset, use_exp2, is_fp8)
+        o_i, softmax_lse_i, sd_mask_i = attention_forward_core_ref_impl(
+            q_i, k_i, v_i, sm_scale, causal, dropout_p, philox_seed, philox_offset, use_exp2,
+            output_dtype=output_dtype,
+        )
 
         # Reshape outputs back to original dimensions
         if group_size != 1:
@@ -325,8 +329,9 @@ def attention_forward_pytorch_ref_impl(
     dropout_p,
     philox_seed,
     philox_offset,
-    use_exp2
-    ):
+    use_exp2,
+    output_dtype=torch.float16,
+):
     if DEBUG:
         print()
         print("attention_forward_pytorch_ref_impl")
@@ -344,6 +349,7 @@ def attention_forward_pytorch_ref_impl(
         print("philox_seed:", philox_seed)
         print("philox_offset:", philox_offset)
         print("use_exp2:", use_exp2)
+        print("output_dtype:", output_dtype)
 
     is_fp8 = check_is_fp8(q)
 
@@ -368,20 +374,22 @@ def attention_forward_pytorch_ref_impl(
             philox_seed,
             philox_offset,
             use_exp2,
-            is_fp8
+            output_dtype=output_dtype,
         )
     else:
-        o_ref, softmax_lse_ref, sd_mask_ref = attention_vanilla_forward_pytorch_ref_impl(q.clone(),
-                                                       k.clone(),
-                                                       v.clone(),
-                                                       sm_scale,
-                                                       causal,
-                                                       layout,
-                                                       dropout_p,
-                                                       philox_seed,
-                                                       philox_offset,
-                                                       use_exp2,
-                                                       is_fp8)
+        o_ref, softmax_lse_ref, sd_mask_ref = attention_vanilla_forward_pytorch_ref_impl(
+            q.clone(),
+            k.clone(),
+            v.clone(),
+            sm_scale,
+            causal,
+            layout,
+            dropout_p,
+            philox_seed,
+            philox_offset,
+            use_exp2,
+            output_dtype=output_dtype,
+        )
 
     if DEBUG:
         print()

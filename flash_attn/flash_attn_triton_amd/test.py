@@ -510,9 +510,10 @@ def test_op_prefill_fwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropou
 @pytest.mark.parametrize('dropout_p', [0.0])
 @pytest.mark.parametrize('layout', ["bhsd", "bshd", "thd"])
 @pytest.mark.parametrize('use_exp2', [True, False])
-@pytest.mark.parametrize('dtype', [torch.float8_e4m3fnuz])
+@pytest.mark.parametrize('input_dtype', [torch.float8_e4m3fnuz])
+@pytest.mark.parametrize('output_dtype', [torch.float32])
 @pytest.mark.parametrize('DEBUG_INPUT', [False])  # NOTE: debug input can overflow when the tensors are large. Just use to figure out issues.
-def test_op_prefill_fwd_impl_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, layout, use_exp2, dtype, DEBUG_INPUT):
+def test_op_prefill_fwd_impl_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, layout, use_exp2, input_dtype, output_dtype, DEBUG_INPUT):
     # TODO: fp8 error tolerance must not be tweaked.
     atol = 1.009e-01
     rtol = 9.128e-02
@@ -521,17 +522,13 @@ def test_op_prefill_fwd_impl_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dr
     device = "cuda"
 
     if layout == "thd":
-        q, k, v, metadata = varlen_input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, device=device, DEBUG_INPUT=DEBUG_INPUT)
+        q, k, v, metadata = varlen_input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, input_dtype, device=device, DEBUG_INPUT=DEBUG_INPUT)
     else:
-        q, k, v, metadata = input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout, device=device, DEBUG_INPUT=DEBUG_INPUT)
+        q, k, v, metadata = input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, input_dtype, layout, device=device, DEBUG_INPUT=DEBUG_INPUT)
     if DEBUG_INPUT:
-        output_triton = torch.zeros_like(q).contiguous()
+        output_triton = torch.zeros_like(q, dtype=output_dtype).contiguous()
     else:
-        output_triton = torch.empty_like(q)
-
-    # Alex said: "this massively improved accuracy. The output tensor needs to be of high precision"
-    # Why?
-    output_triton = output_triton.to(torch.float32)
+        output_triton = torch.empty_like(q, dtype=output_dtype)
 
     if DEBUG:
         if HQ // HK != 1:
@@ -550,24 +547,25 @@ def test_op_prefill_fwd_impl_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dr
 
     # call Triton's forward implementation directly
     output_triton, softmax_lse_triton, sd_mask_triton = attention_prefill_forward_triton_impl(
-                                                q,
-                                                k,
-                                                v,
-                                                output_triton,
-                                                metadata.sm_scale,
-                                                metadata.alibi_slopes,
-                                                metadata.causal,
-                                                metadata.bias,
-                                                metadata.layout,
-                                                metadata.cu_seqlens_q,
-                                                metadata.cu_seqlens_k,
-                                                metadata.max_seqlens_q,
-                                                metadata.max_seqlens_k,
-                                                metadata.dropout_p,
-                                                metadata.philox_seed,
-                                                metadata.philox_offset,
-                                                metadata.return_scores,
-                                                metadata.use_exp2)
+        q,
+        k,
+        v,
+        output_triton,
+        metadata.sm_scale,
+        metadata.alibi_slopes,
+        metadata.causal,
+        metadata.bias,
+        metadata.layout,
+        metadata.cu_seqlens_q,
+        metadata.cu_seqlens_k,
+        metadata.max_seqlens_q,
+        metadata.max_seqlens_k,
+        metadata.dropout_p,
+        metadata.philox_seed,
+        metadata.philox_offset,
+        metadata.return_scores,
+        metadata.use_exp2,
+    )
 
     output_ref, softmax_lse_ref, sd_mask_ref = attention_forward_pytorch_ref_impl(
         q, k, v,
@@ -581,7 +579,8 @@ def test_op_prefill_fwd_impl_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dr
         metadata.dropout_p,
         metadata.philox_seed,
         metadata.philox_offset,
-        use_exp2
+        use_exp2,
+        output_dtype=output_dtype,
     )
 
     if DEBUG:
@@ -593,7 +592,7 @@ def test_op_prefill_fwd_impl_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dr
         if DEBUG:
             print("sd_mask_triton:", sd_mask_triton, sd_mask_triton.shape)
             print("sd_mask_ref:", sd_mask_ref, sd_mask_ref.shape)
-        torch.testing.assert_close(sd_mask_triton.to(torch.float32), sd_mask_ref.to(torch.float32), atol=atol, rtol=rtol)
+        torch.testing.assert_close(sd_mask_triton.to(output_dtype), sd_mask_ref.to(output_dtype), atol=atol, rtol=rtol)
 
     if DEBUG:
         print("softmax_lse_triton:", softmax_lse_triton, softmax_lse_triton.shape)
@@ -603,7 +602,7 @@ def test_op_prefill_fwd_impl_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dr
     if DEBUG:
         print("output_triton:", output_triton, output_triton.shape)
         print("output_ref:", output_ref, output_ref.shape)
-    torch.testing.assert_close(output_triton.to(torch.float32), output_ref.to(torch.float32), atol=atol, rtol=rtol)
+    torch.testing.assert_close(output_triton.to(output_dtype), output_ref.to(output_dtype), atol=atol, rtol=rtol)
 
 
 @pytest.mark.parametrize(
