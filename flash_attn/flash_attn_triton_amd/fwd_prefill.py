@@ -543,13 +543,13 @@ def attn_fwd(Q, K, V, bias,
     tl.store(o_ptrs, acc.to(Out.dtype.element_ty), mask=o_ptrs_mask)
 
 
-@torch.no_grad()
 def _scale_fp8(x, x_scale, layout, cu_seqlens=None):
     assert layout in ["bhsd", "bshd", "thd"], "Unknow layout."
     assert (layout == "thd" and cu_seqlens is not None) or layout != "thd", "cu_seqlens is required for varlen layout."
     # Fraction numerator is float32 version of x.
-    n = x.to(torch.float32)
+    n = x.detach().to(torch.float32)
     # Fraction denominator is the broadcasted scaled factor.
+    x_scale = x_scale.detach()
     if layout == "bhsd":
         x_scaled = n / x_scale[:, :, None, None]
     elif layout == "bshd":
@@ -560,7 +560,7 @@ def _scale_fp8(x, x_scale, layout, cu_seqlens=None):
             for z, (s, e) in enumerate(zip(cu_seqlens[:-1], cu_seqlens[1:]))
         ], dim=0)
     # Clamp and convert back to float8.
-    return torch.clamp(x_scaled, min=torch.finfo(x.dtype).min, max=torch.finfo(x.dtype).max).to(x.dtype)
+    return torch.clamp(x_scaled, min=torch.finfo(x.dtype).min, max=torch.finfo(x.dtype).max).to(x.dtype).requires_grad_()
 
 
 def attention_prefill_forward_triton_impl(
