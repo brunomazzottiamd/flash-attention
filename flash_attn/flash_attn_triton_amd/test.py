@@ -512,14 +512,22 @@ def test_op_prefill_fwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropou
 @pytest.mark.parametrize("use_exp2", [True, False])
 @pytest.mark.parametrize("scale_per_head", [True, False])
 @pytest.mark.parametrize("input_dtype", [torch.float8_e4m3fnuz])
-@pytest.mark.parametrize("output_dtype", [torch.float32])
+@pytest.mark.parametrize("output_dtype", [torch.float16])
 @pytest.mark.parametrize("DEBUG_INPUT", [False])  # NOTE: debug input can overflow when the tensors are large. Just use to figure out issues.
 def test_op_prefill_fwd_impl_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD,
                                  causal, dropout_p, layout, use_exp2, scale_per_head,
                                  input_dtype, output_dtype, DEBUG_INPUT):
+    # Higher error tolerance:
     # TODO: fp8 error tolerance must not be tweaked.
+    # input_dtype = float8_e4m3fnuz, output_dtype = float16 ==> 656 / 720 tests pass
+    # input_dtype = float8_e4m3fnuz, output_dtype = float32 ==> 656 / 720 tests pass
     atol = 1.009e-01
     rtol = 9.128e-02
+    # Default error tolerance:
+    # input_dtype = float8_e4m3fnuz, output_dtype = float16 ==>   0 / 720 tests pass
+    # input_dtype = float8_e4m3fnuz, output_dtype = float32 ==>  40 / 720 tests pass
+    # atol = ATOL
+    # rtol = RTOL
 
     torch.manual_seed(0)
     device = "cuda"
