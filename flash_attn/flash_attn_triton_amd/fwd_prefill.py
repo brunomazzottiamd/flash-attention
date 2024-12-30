@@ -1,7 +1,8 @@
 import torch
 import triton
 import triton.language as tl
-from .utils import DEBUG, DROPOUT_USE_PYTORCH, DROPOUT_DUMP, AUTOTUNE, get_shape_from_layout, get_strides_from_layout, is_cdna, is_rdna, write_dropout_mask, create_dropout_mask, create_scale_tensors, check_is_fp8
+from .utils import DEBUG, DROPOUT_USE_PYTORCH, DROPOUT_DUMP, AUTOTUNE, get_shape_from_layout, get_strides_from_layout, is_cdna, is_rdna, write_dropout_mask, create_dropout_mask
+from .fp8 import check_is_fp8, create_fp8_scale_tensors, scale_fp8
 
 # NOTE: triton fails to import tl.constexprs so create them here for the file
 tl_DROPOUT_USE_PYTORCH: tl.constexpr = DROPOUT_USE_PYTORCH
@@ -539,26 +540,6 @@ def attn_fwd(Q, K, V, bias,
     tl.store(o_ptrs, acc.to(Out.dtype.element_ty), mask=o_ptrs_mask)
 
 
-def _scale_fp8(x, x_scale, layout, cu_seqlens=None):
-    assert layout in ["bhsd", "bshd", "thd"], "Unknow layout."
-    assert (layout == "thd" and cu_seqlens is not None) or layout != "thd", "cu_seqlens is required for varlen layout."
-    # Fraction numerator is float32 version of x.
-    n = x.detach().to(torch.float32)
-    # Fraction denominator is the broadcasted scaled factor.
-    x_scale = x_scale.detach()
-    if layout == "bhsd":
-        x_scaled = n / x_scale[:, :, None, None]
-    elif layout == "bshd":
-        x_scaled = n / x_scale[:, None, :, None]
-    elif layout == "thd":
-        x_scaled = torch.cat([
-            n[s:e] / x_scale[z, :].unsqueeze(0).unsqueeze(-1)
-            for z, (s, e) in enumerate(zip(cu_seqlens[:-1], cu_seqlens[1:]))
-        ], dim=0)
-    # Clamp and convert back to float8.
-    return torch.clamp(x_scaled, min=torch.finfo(x.dtype).min, max=torch.finfo(x.dtype).max).to(x.dtype).requires_grad_()
-
-
 def attention_prefill_forward_triton_impl(
                                         q,
                                         k,
@@ -589,7 +570,7 @@ def attention_prefill_forward_triton_impl(
     if is_fp8:
         # if qkv are fp8, then find scaling factor for quantization
         # TODO: if SCALE_PER_HEAD: within the kernel itself just compute qkv_scale = tl.max(q or k or v)
-        q_scale, k_scale, v_scale, p_scale, p_inv_scale = create_scale_tensors(
+        q_scale, k_scale, v_scale, p_scale, p_inv_scale = create_fp8_scale_tensors(
             q, k, v, layout,
             cu_seqlens_q=cu_seqlens_q, cu_seqlens_k=cu_seqlens_k, max_seqlen_q=max_seqlens_q, max_seqlen_k=max_seqlens_k,
             scale_per_head=scale_per_head,
@@ -598,9 +579,9 @@ def attention_prefill_forward_triton_impl(
         kv_scale_stride_z = k_scale.stride(0)
         p_scale_stride_z = p_scale.stride(0)
         p_inv_scale_stride_z = p_inv_scale.stride(0)
-        q = _scale_fp8(q, q_scale, layout, cu_seqlens=cu_seqlens_q)
-        k = _scale_fp8(k, k_scale, layout, cu_seqlens=cu_seqlens_k)
-        v = _scale_fp8(v, v_scale, layout, cu_seqlens=cu_seqlens_k)
+        q = scale_fp8(q, q_scale, layout, cu_seqlens=cu_seqlens_q)
+        k = scale_fp8(k, k_scale, layout, cu_seqlens=cu_seqlens_k)
+        v = scale_fp8(v, v_scale, layout, cu_seqlens=cu_seqlens_k)
     else:
         q_scale_stride_z = kv_scale_stride_z = p_scale_stride_z = p_inv_scale_stride_z = 0
         q_scale = k_scale = v_scale = p_scale = p_inv_scale = 1

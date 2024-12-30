@@ -1,6 +1,7 @@
 import torch
 import math
-from .utils import create_scale_tensors, check_is_fp8, DEBUG
+from .utils import DEBUG
+from .fp8 import check_is_fp8
 
 DEBUG_CORE = False
 
