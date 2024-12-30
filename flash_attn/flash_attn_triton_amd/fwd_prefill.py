@@ -82,11 +82,9 @@ def _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stri
             k_offs_n = None
         k_offs_k = None if not PADDED_HEAD else tl.arange(0, BLOCK_DMODEL)
         k = load_fn(k_ptrs, k_offs_k, k_offs_n, ACTUAL_BLOCK_DMODEL, actual_seqlen_k)
-
         if PRE_LOAD_V:
             # We can use the same offsets as k, just with dims transposed.
             v = load_fn(v_ptrs, k_offs_n, k_offs_k, actual_seqlen_k, ACTUAL_BLOCK_DMODEL)
-            
         qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
         # We start from end of seqlen_k so only the first iteration would need
         # to be checked for padding if it is not a multiple of block_n
@@ -102,12 +100,13 @@ def _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stri
                 size_n = start_n + OFFS_N[None, :]
                 mask = size_n < boundary_m[:, None]
                 qk = tl.where(mask, qk, float("-inf"))
-        
+
         # -- compute qk ----
         qk += tl.dot(q, k)
         qk_scaled = qk * SM_SCALE
         if IS_FP8:
-            qk_scaled *= q_scale * k_scale # descale qk after matmul if quantized
+            qk_scaled *= q_scale * k_scale  # descale qk after matmul if quantized
+
         if IS_CAUSAL:
             causal_boundary = start_n + offs_n_causal
             causal_mask = OFFS_M[:, None] >= causal_boundary[None, :]
@@ -139,7 +138,7 @@ def _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stri
         p_mask = (OFFS_M[:, None] < actual_seqlen_q) & ((start_n + tl.arange(0, BLOCK_N))[None, :] < actual_seqlen_k)
 
         # CAVEAT: Must update l_ij before applying dropout
-        l_ij = tl.sum(p, 1) # p = fp32 at this point
+        l_ij = tl.sum(p, 1)  # p is fp32 at this point
         if ENABLE_DROPOUT:
             if tl_DROPOUT_USE_PYTORCH:
                 dropout_mask = tl.load(dropout_mask_ptrs, mask=p_mask)
@@ -176,11 +175,8 @@ def _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stri
         m_i = m_ij
 
         if IS_FP8:
-            # if you want to use p_scaled: tl.dot(p_scaled.to(v.type.element_ty), v) * v_scale * p_scale
             acc += (tl.dot((p * p_inv_scale).to(v.type.element_ty), v) * p_scale * v_scale).to(tl.float32)
         else:
-            # NOTE: if you make the below operation tl.float16 + set FLASH_ATTENTION_TRITON_AMD_REMOVE_QUANT_SCALE=1. It passes.
-            #       --> acc += tl.dot(p.to(tl.float16), v.to(tl.float16)) PASSES
             acc += tl.dot(p.to(v.type.element_ty), v).to(tl.float32)
 
         k_ptrs += BLOCK_N * stride_kn
