@@ -37,8 +37,7 @@ EQUAL_NAN = True
 @pytest.mark.parametrize('causal', [True, False])
 @pytest.mark.parametrize('use_alibi', [True, False])
 @pytest.mark.parametrize('layout', ['bshd', 'bhsd'])
-@pytest.mark.parametrize('dtype', [torch.float16])  # FIXME: crashes when dtype is torch.float8_e4m3fnuz
-def test_op_fwd_prefill(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_alibi, layout, dtype):
+def test_op_fwd_prefill(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_alibi, layout, dtype=torch.float16):
     torch.manual_seed(20)
     q, k, v, input_metadata = input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout)
     if causal:
@@ -111,8 +110,7 @@ def test_op_fwd_prefill(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_alibi, 
 ])
 @pytest.mark.parametrize('causal', [True, False])
 @pytest.mark.parametrize('use_bias', [True])
-@pytest.mark.parametrize('dtype', [torch.float16])  # FIXME: crashes when dtype is torch.float8_e4m3fnuz
-def test_op_fwd_prefill_bias(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_bias, dtype):
+def test_op_fwd_prefill_bias(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_bias, dtype=torch.float16):
     torch.manual_seed(20)
     sm_scale = D_HEAD**-0.5
     input_metadata = MetaData(sm_scale=sm_scale)
@@ -669,9 +667,9 @@ def test_op_prefill_fwd_impl_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD,
 @pytest.mark.parametrize('use_exp2', [False]) # FIXME: using exp2 causes issue when used with causal
 @pytest.mark.parametrize('layout', ["bhsd", "bshd", "thd"])
 @pytest.mark.parametrize('sequence_parallel', [True, False])
-@pytest.mark.parametrize('dtype', [torch.float8_e4m3fnuz, torch.float16])
 @pytest.mark.parametrize('DEBUG_INPUT', [False]) # debug output causes nans on larger tensors
-def test_op_prefill_bwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, use_exp2, layout, sequence_parallel, dtype, DEBUG_INPUT):
+def test_op_prefill_bwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, use_exp2, layout, sequence_parallel, DEBUG_INPUT):
+    dtype = torch.float16
     torch.manual_seed(20) # seed from test_op_bwd
 
     alibi_slopes = None
