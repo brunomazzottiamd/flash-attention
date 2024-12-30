@@ -22,10 +22,10 @@ FP8_MAX: dict[torch.dtype, float] = {
 }
 
 
-def check_is_fp8(x: Tensor) -> bool:
+def check_is_fp8(x: Tensor, *xs: Tensor) -> bool:
     if REMOVE_QUANTIZATION_SCALING:
         return False  # makes all methods believe they aren't working with fp8s, so no scaling is applied
-    return x.dtype in FP8_TYPES
+    return any(y.dtype in FP8_TYPES for y in (x,) + xs)
 
 
 def create_fp8_scale_tensors(
@@ -66,7 +66,7 @@ def create_fp8_scale_tensors(
         assert max_seqlen_q is not None, "max_seqlen_q is required for varlen layout."
         assert max_seqlen_k is not None, "max_seqlen_k is required for varlen layout."
 
-    is_fp8 = check_is_fp8(q) or check_is_fp8(k) or check_is_fp8(v)
+    is_fp8 = check_is_fp8(q, k, v)
     batch, head_q, head_k, _, _, _ = get_shape_from_layout(
         q, k, layout,
         cu_seqlens_q=cu_seqlens_q, cu_seqlens_k=cu_seqlens_k, max_seqlen_q=max_seqlen_q, max_seqlen_k=max_seqlen_k,
@@ -143,6 +143,8 @@ def scale_fp8(
 ) -> Tensor:
     assert layout in ["bhsd", "bshd", "thd"], "Unknow layout."
     assert (layout == "thd" and cu_seqlens is not None) or layout != "thd", "cu_seqlens is required for varlen layout."
+    if not check_is_fp8(x):
+        return x
     # Fraction numerator is float32 version of x.
     n = x.detach().to(torch.float32)
     # Fraction denominator is the broadcasted scaled factor.
@@ -157,4 +159,5 @@ def scale_fp8(
             for z, (s, e) in enumerate(zip(cu_seqlens[:-1], cu_seqlens[1:]))
         ], dim=0)
     # Clamp and convert back to float8.
-    return torch.clamp(x_scaled, min=torch.finfo(x.dtype).min, max=torch.finfo(x.dtype).max).to(x.dtype).requires_grad_()
+    return torch.clamp(x_scaled, min=torch.finfo(x.dtype).min, max=torch.finfo(x.dtype).max).to(
+        x.dtype).requires_grad_(x.requires_grad)

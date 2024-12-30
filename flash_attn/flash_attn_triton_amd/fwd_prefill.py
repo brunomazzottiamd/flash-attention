@@ -565,7 +565,7 @@ def attention_prefill_forward_triton_impl(
                                         # fp8 scaling
                                         scale_per_head=True):
     is_varlen = layout == "thd"  # check if varlen
-    is_fp8 = check_is_fp8(q)
+    is_fp8 = check_is_fp8(q, k, v)
 
     if is_fp8:
         # if qkv are fp8, then find scaling factor for quantization

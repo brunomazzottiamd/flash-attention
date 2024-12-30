@@ -352,7 +352,7 @@ def attention_forward_pytorch_ref_impl(
         print("use_exp2:", use_exp2)
         print("output_dtype:", output_dtype)
 
-    is_fp8 = check_is_fp8(q)
+    is_fp8 = check_is_fp8(q, k, v)
 
     # if is fp8 upcast to fp32 for torch ops to be supported
     if is_fp8:
