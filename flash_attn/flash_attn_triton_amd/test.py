@@ -518,20 +518,21 @@ def test_op_prefill_fwd_impl_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD,
                                  input_dtype, output_dtype, DEBUG_INPUT):
     # Higher error tolerance:
     # TODO: fp8 error tolerance must not be tweaked.
-    # input_dtype = float8_e4m3fnuz, output_dtype = float16 ==> 656 / 720 tests pass
-    # input_dtype = float8_e4m3fnuz, output_dtype = float32 ==> 656 / 720 tests pass
+    # input_dtype = float8_e4m3fnuz, output_dtype = float16 ==> 692 / 720 tests pass
+    # input_dtype = float8_e4m3fnuz, output_dtype = float32 ==> 692 / 720 tests pass
     atol = 1.009e-01
     rtol = 9.128e-02
     # Default error tolerance:
-    # input_dtype = float8_e4m3fnuz, output_dtype = float16 ==>   0 / 720 tests pass
-    # input_dtype = float8_e4m3fnuz, output_dtype = float32 ==>  40 / 720 tests pass
+    # input_dtype = float8_e4m3fnuz, output_dtype = float16 ==> 124 / 720 tests pass
+    # input_dtype = float8_e4m3fnuz, output_dtype = float32 ==> 124 / 720 tests pass
     # atol = ATOL
     # rtol = RTOL
 
     torch.manual_seed(0)
     device = "cuda"
+    is_varlen = layout == "thd"
 
-    if layout == "thd":
+    if is_varlen:
         q, k, v, metadata = varlen_input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, input_dtype, device=device, DEBUG_INPUT=DEBUG_INPUT)
     else:
         q, k, v, metadata = input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, input_dtype, layout, device=device, DEBUG_INPUT=DEBUG_INPUT)
@@ -580,10 +581,11 @@ def test_op_prefill_fwd_impl_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD,
     )
 
     # TODO: Use same q, k, v for Triton and PyTorch reference.
+    use_scaled_tensors = (not is_varlen) and (HQ == HK)
     output_ref, softmax_lse_ref, sd_mask_ref = attention_forward_pytorch_ref_impl(
-        q,
-        k,
-        v,
+        fp8_metadata.q_scaled if use_scaled_tensors else q,
+        fp8_metadata.k_scaled if use_scaled_tensors else k,
+        fp8_metadata.v_scaled if use_scaled_tensors else v,
         metadata.sm_scale,
         causal,
         layout,
