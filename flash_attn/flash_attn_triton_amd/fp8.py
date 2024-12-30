@@ -4,7 +4,7 @@ from typing import Optional
 import torch
 from torch import Tensor
 
-from .utils import get_shape_from_layout
+from .utils import get_shape_from_layout, MetaData
 
 
 REMOVE_QUANTIZATION_SCALING: bool = os.environ.get("FLASH_ATTENTION_TRITON_AMD_REMOVE_QUANT_SCALE", "0").lower() in ("1", "true", "yes")
@@ -161,3 +161,31 @@ def scale_fp8(
     # Clamp and convert back to float8.
     return torch.clamp(x_scaled, min=torch.finfo(x.dtype).min, max=torch.finfo(x.dtype).max).to(
         x.dtype).requires_grad_(x.requires_grad)
+
+
+class Fp8MetaData:
+    scale_per_head: bool
+    q_scale: Tensor
+    k_scale: Tensor
+    v_scale: Tensor
+    p_scale: Tensor
+    p_inv_scale: Tensor
+    q_scaled: Tensor
+    k_scaled: Tensor
+    v_scaled: Tensor
+
+    def __init__(
+        self,
+        q: Tensor, k: Tensor, v: Tensor, layout: str, metadata: MetaData,
+        scale_per_head: bool = True,
+    ) -> None:
+        self.scale_per_head = scale_per_head
+        self.q_scale, self.k_scale, self.v_scale, self.p_scale, self.p_inv_scale = create_fp8_scale_tensors(
+            q, k, v, layout,
+            cu_seqlens_q=metadata.cu_seqlens_q, cu_seqlens_k=metadata.cu_seqlens_k,
+            max_seqlen_q=metadata.max_seqlens_q, max_seqlen_k=metadata.max_seqlens_k,
+            scale_per_head=scale_per_head,
+        )
+        self.q_scaled = scale_fp8(q, self.q_scale, layout, cu_seqlens=metadata.cu_seqlens_q)
+        self.k_scaled = scale_fp8(k, self.k_scale, layout, cu_seqlens=metadata.cu_seqlens_k)
+        self.v_scaled = scale_fp8(v, self.v_scale, layout, cu_seqlens=metadata.cu_seqlens_k)

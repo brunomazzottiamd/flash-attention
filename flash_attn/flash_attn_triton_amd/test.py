@@ -8,6 +8,7 @@ from .fwd_prefill import attention_prefill_forward_triton_impl
 from .bwd_prefill import attention_prefill_backward_triton_impl
 from .bwd_ref import attention_backward_pytorch_ref_impl
 from .fwd_decode import dequantize_kv_fp16, quantize_kv_int4
+from .fp8 import Fp8MetaData
 
 # defailt fp16 tolerance is ATOL, RTOL = 1e-5, 1e-3. See table https://pytorch.org/docs/stable/testing.html
 ATOL, RTOL = 1e-2, 1e-2 # old standard. maybe to lose. 
@@ -534,6 +535,9 @@ def test_op_prefill_fwd_impl_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD,
         q, k, v, metadata = varlen_input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, input_dtype, device=device, DEBUG_INPUT=DEBUG_INPUT)
     else:
         q, k, v, metadata = input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, input_dtype, layout, device=device, DEBUG_INPUT=DEBUG_INPUT)
+    fp8_metadata = Fp8MetaData(q, k, v, layout, metadata, scale_per_head=scale_per_head)
+    # TODO: Use same q, k, v for Triton and PyTorch reference.
+    # q, k, v = fp8_metadata.q_scaled, fp8_metadata.k_scaled, fp8_metadata.v_scaled
     if DEBUG_INPUT:
         output_triton = torch.zeros_like(q, dtype=output_dtype).contiguous()
     else:
@@ -549,16 +553,14 @@ def test_op_prefill_fwd_impl_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD,
     metadata.use_exp2 = use_exp2
     if causal:
         metadata.need_causal()
-
-    # NOTE: the returned score is not the same as the reference because we need to adjust as we find new maxes per block. We are not doing that
     if dropout_p > 0.0:
         metadata.need_dropout(dropout_p)
 
     # call Triton's forward implementation directly
     output_triton, softmax_lse_triton, sd_mask_triton = attention_prefill_forward_triton_impl(
-        q,
-        k,
-        v,
+        fp8_metadata.q_scaled,
+        fp8_metadata.k_scaled,
+        fp8_metadata.v_scaled,
         output_triton,
         metadata.sm_scale,
         metadata.alibi_slopes,
@@ -574,11 +576,14 @@ def test_op_prefill_fwd_impl_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD,
         metadata.philox_offset,
         metadata.return_scores,
         metadata.use_exp2,
-        scale_per_head=scale_per_head,
+        fp8_metadata=fp8_metadata,
     )
 
+    # TODO: Use same q, k, v for Triton and PyTorch reference.
     output_ref, softmax_lse_ref, sd_mask_ref = attention_forward_pytorch_ref_impl(
-        q, k, v,
+        q,
+        k,
+        v,
         metadata.sm_scale,
         causal,
         layout,
@@ -591,6 +596,7 @@ def test_op_prefill_fwd_impl_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD,
         metadata.philox_offset,
         use_exp2,
         output_dtype=output_dtype,
+        fp8_metadata=fp8_metadata,
     )
 
     if DEBUG:

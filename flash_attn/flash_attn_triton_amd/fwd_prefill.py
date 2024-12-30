@@ -562,29 +562,22 @@ def attention_prefill_forward_triton_impl(
                                         # misc
                                         return_softmax,
                                         use_exp2,
-                                        # fp8 scaling
-                                        scale_per_head=True):
-    is_varlen = layout == "thd"  # check if varlen
-    is_fp8 = check_is_fp8(q, k, v)
-
+                                        # fp8
+                                        fp8_metadata=None):
+    is_fp8 = fp8_metadata is not None
     if is_fp8:
-        # if qkv are fp8, then find scaling factor for quantization
-        # TODO: if SCALE_PER_HEAD: within the kernel itself just compute qkv_scale = tl.max(q or k or v)
-        q_scale, k_scale, v_scale, p_scale, p_inv_scale = create_fp8_scale_tensors(
-            q, k, v, layout,
-            cu_seqlens_q=cu_seqlens_q, cu_seqlens_k=cu_seqlens_k, max_seqlen_q=max_seqlens_q, max_seqlen_k=max_seqlens_k,
-            scale_per_head=scale_per_head,
-        )
+        q_scale = fp8_metadata.q_scale
+        k_scale = fp8_metadata.k_scale
+        v_scale = fp8_metadata.v_scale
+        p_scale = fp8_metadata.p_scale
+        p_inv_scale = fp8_metadata.p_inv_scale
         q_scale_stride_z = q_scale.stride(0)
         kv_scale_stride_z = k_scale.stride(0)
         p_scale_stride_z = p_scale.stride(0)
         p_inv_scale_stride_z = p_inv_scale.stride(0)
-        q = scale_fp8(q, q_scale, layout, cu_seqlens=cu_seqlens_q)
-        k = scale_fp8(k, k_scale, layout, cu_seqlens=cu_seqlens_k)
-        v = scale_fp8(v, v_scale, layout, cu_seqlens=cu_seqlens_k)
     else:
-        q_scale_stride_z = kv_scale_stride_z = p_scale_stride_z = p_inv_scale_stride_z = 0
         q_scale = k_scale = v_scale = p_scale = p_inv_scale = 1
+        q_scale_stride_z = kv_scale_stride_z = p_scale_stride_z = p_inv_scale_stride_z = 0
 
     if DEBUG:
         print()
@@ -612,6 +605,9 @@ def attention_prefill_forward_triton_impl(
         print("philox_offset:", philox_offset)
         print("return_scores:", return_softmax)
         print("use_exp2:", use_exp2)
+
+    # check if varlen
+    is_varlen = layout == "thd"
 
     # NOTE: a large bias tensor leads to overflow during pointer arithmetic
     if (bias is not None):

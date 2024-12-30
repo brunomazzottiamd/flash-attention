@@ -1,7 +1,6 @@
 import torch
 import math
 from .utils import DEBUG
-from .fp8 import check_is_fp8
 
 DEBUG_CORE = False
 
@@ -332,6 +331,7 @@ def attention_forward_pytorch_ref_impl(
     philox_offset,
     use_exp2,
     output_dtype=torch.float16,
+    fp8_metadata=None
 ):
     if DEBUG:
         print()
@@ -351,14 +351,11 @@ def attention_forward_pytorch_ref_impl(
         print("philox_offset:", philox_offset)
         print("use_exp2:", use_exp2)
         print("output_dtype:", output_dtype)
-
-    is_fp8 = check_is_fp8(q, k, v)
-
     # if is fp8 upcast to fp32 for torch ops to be supported
-    if is_fp8:
+    if fp8_metadata is not None:
         q, k, v = q.to(torch.float32), k.to(torch.float32), v.to(torch.float32)
 
-     # compute reference
+    # compute reference
     if layout == "thd":
         o_ref, softmax_lse_ref, sd_mask_ref = attention_varlen_forward_pytorch_ref_impl(
             q.clone(), 
