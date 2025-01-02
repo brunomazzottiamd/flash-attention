@@ -287,6 +287,9 @@ def attention_varlen_forward_pytorch_ref_impl(
     if layout != 'thd':
         raise ValueError(f"Unsupported layout {layout}. Expected 'thd'.")
 
+    # FP8 scaling
+    is_fp8 = fp8_metadata is not None
+
     batch_size = cu_seqlens_q.shape[0] - 1
     nheads_q, nheads_k = q.shape[1], k.shape[1]
     head_dim = q.shape[2]
@@ -338,16 +341,56 @@ def attention_varlen_forward_pytorch_ref_impl(
             q_i = q_i.reshape(nheads_k * group_size, seqlen_q, head_dim)
             k_i = k_i.reshape(nheads_k * group_size, seqlen_k, head_dim)
             v_i = v_i.reshape(nheads_k * group_size, seqlen_k, head_dim)
+            # FP8 scaling
+            q_scale = (
+                fp8_metadata.q_scale[i].reshape(nheads_k, group_size)
+                .reshape(nheads_k * group_size, 1, 1)
+                if is_fp8
+                else None
+            )
+            k_scale = (
+                fp8_metadata.k_scale[i].unsqueeze(1)
+                .expand(nheads_k, group_size)
+                .reshape(nheads_k * group_size, 1, 1)
+                if is_fp8
+                else None
+            )
+            v_scale = (
+                fp8_metadata.v_scale[i].unsqueeze(1)
+                .expand(nheads_k, group_size)
+                .reshape(nheads_k * group_size, 1, 1)
+                if is_fp8
+                else None
+            )
+            p_scale = (
+                fp8_metadata.p_scale[i].reshape(nheads_k, group_size)
+                .reshape(nheads_k * group_size, 1, 1)
+                if is_fp8
+                else None
+            )
+            p_inv_scale = (
+                fp8_metadata.p_inv_scale[i].reshape(nheads_k, group_size)
+                .reshape(nheads_k * group_size, 1, 1)
+                if is_fp8
+                else None
+            )
         else:
             # Standard case
             q_i = q_i.reshape(nheads_q, seqlen_q, head_dim)
             k_i = k_i.reshape(nheads_k, seqlen_k, head_dim)
             v_i = v_i.reshape(nheads_k, seqlen_k, head_dim)
+            # FP8 scaling
+            q_scale = fp8_metadata.q_scale[i].reshape(-1, 1, 1) if is_fp8 else None
+            k_scale = fp8_metadata.k_scale[i].reshape(-1, 1, 1) if is_fp8 else None
+            v_scale = fp8_metadata.v_scale[i].reshape(-1, 1, 1) if is_fp8 else None
+            p_scale = fp8_metadata.p_scale[i].reshape(-1, 1, 1) if is_fp8 else None
+            p_inv_scale = fp8_metadata.p_inv_scale[i].reshape(-1, 1, 1) if is_fp8 else None
 
         # Call the core attention function for this sequence
         o_i, softmax_lse_i, sd_mask_i = attention_forward_core_ref_impl(
             q_i, k_i, v_i, sm_scale, causal, dropout_p, philox_seed, philox_offset, use_exp2,
             output_dtype=output_dtype,
+            q_scale=q_scale, k_scale=k_scale, v_scale=v_scale, p_scale=p_scale, p_inv_scale=p_inv_scale,
         )
 
         # Reshape outputs back to original dimensions

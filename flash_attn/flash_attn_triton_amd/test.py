@@ -537,8 +537,7 @@ def test_op_prefill_fwd_impl_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD,
     else:
         q, k, v, metadata = input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, input_dtype, layout, device=device, DEBUG_INPUT=DEBUG_INPUT)
     fp8_metadata = Fp8MetaData(q, k, v, layout, metadata, scale_per_head=scale_per_head)
-    # TODO: Use same q, k, v for Triton and PyTorch reference.
-    # q, k, v = fp8_metadata.q_scaled, fp8_metadata.k_scaled, fp8_metadata.v_scaled
+    q, k, v = fp8_metadata.q_scaled, fp8_metadata.k_scaled, fp8_metadata.v_scaled
     if DEBUG_INPUT:
         output_triton = torch.zeros_like(q, dtype=output_dtype).contiguous()
     else:
@@ -559,9 +558,9 @@ def test_op_prefill_fwd_impl_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD,
 
     # call Triton's forward implementation directly
     output_triton, softmax_lse_triton, sd_mask_triton = attention_prefill_forward_triton_impl(
-        fp8_metadata.q_scaled,
-        fp8_metadata.k_scaled,
-        fp8_metadata.v_scaled,
+        q,
+        k,
+        v,
         output_triton,
         metadata.sm_scale,
         metadata.alibi_slopes,
@@ -580,12 +579,10 @@ def test_op_prefill_fwd_impl_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD,
         fp8_metadata=fp8_metadata,
     )
 
-    # TODO: Use same q, k, v for Triton and PyTorch reference.
-    use_scaled_tensors = not is_varlen
     output_ref, softmax_lse_ref, sd_mask_ref = attention_forward_pytorch_ref_impl(
-        fp8_metadata.q_scaled if use_scaled_tensors else q,
-        fp8_metadata.k_scaled if use_scaled_tensors else k,
-        fp8_metadata.v_scaled if use_scaled_tensors else v,
+        q,
+        k,
+        v,
         metadata.sm_scale,
         causal,
         layout,
