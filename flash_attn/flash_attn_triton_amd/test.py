@@ -518,13 +518,13 @@ def test_op_prefill_fwd_impl_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD,
                                  input_dtype, output_dtype, DEBUG_INPUT):
     # Higher error tolerance:
     # TODO: fp8 error tolerance must not be tweaked.
-    # input_dtype = float8_e4m3fnuz, output_dtype = float16 ==> 704 / 720 tests pass
-    # input_dtype = float8_e4m3fnuz, output_dtype = float32 ==> 704 / 720 tests pass
+    # input_dtype = float8_e4m3fnuz, output_dtype = float16 ==> 720 / 720 tests pass
+    # input_dtype = float8_e4m3fnuz, output_dtype = float32 ==> 720 / 720 tests pass
     atol = 1.009e-01
     rtol = 9.128e-02
     # Default error tolerance:
-    # input_dtype = float8_e4m3fnuz, output_dtype = float16 ==> 154 / 720 tests pass
-    # input_dtype = float8_e4m3fnuz, output_dtype = float32 ==> 154 / 720 tests pass
+    # input_dtype = float8_e4m3fnuz, output_dtype = float16 ==> 174 / 720 tests pass
+    # input_dtype = float8_e4m3fnuz, output_dtype = float32 ==> 174 / 720 tests pass
     # atol = ATOL
     # rtol = RTOL
 
