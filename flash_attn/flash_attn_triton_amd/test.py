@@ -581,7 +581,7 @@ def test_op_prefill_fwd_impl_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD,
     )
 
     # TODO: Use same q, k, v for Triton and PyTorch reference.
-    use_scaled_tensors = (not is_varlen) and (HQ == HK)
+    use_scaled_tensors = not is_varlen
     output_ref, softmax_lse_ref, sd_mask_ref = attention_forward_pytorch_ref_impl(
         fp8_metadata.q_scaled if use_scaled_tensors else q,
         fp8_metadata.k_scaled if use_scaled_tensors else k,

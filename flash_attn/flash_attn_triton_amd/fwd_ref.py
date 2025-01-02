@@ -169,6 +169,9 @@ def attention_vanilla_forward_pytorch_ref_impl(q, k, v, sm_scale, causal, layout
     elif layout != "bhsd":
         raise ValueError(f"Unknown layout {layout}")
 
+    # FP8 scaling
+    is_fp8 = fp8_metadata is not None
+
     # Prepare tensors
     batch_size, nheads_q, seq_len_q, head_dim = q.shape
     batch_size, nheads_k, seq_len_k, head_dim = k.shape
@@ -188,17 +191,46 @@ def attention_vanilla_forward_pytorch_ref_impl(q, k, v, sm_scale, causal, layout
         k = k.reshape(batch_size * nheads_k * group_size, seq_len_k, head_dim)
         v = v.reshape(batch_size * nheads_k * group_size, seq_len_k, head_dim)
         # FP8 scaling
-        q_scale = None
-        k_scale = None
-        v_scale = None
-        p_scale = None
-        p_inv_scale = None
+        q_scale = (
+            fp8_metadata.q_scale.reshape(batch_size, nheads_k, group_size).reshape(
+                batch_size * nheads_k * group_size, 1, 1
+            )
+            if is_fp8
+            else None
+        )
+        k_scale = (
+            fp8_metadata.k_scale.unsqueeze(2)
+            .expand(batch_size, nheads_k, group_size)
+            .reshape(batch_size * nheads_k * group_size, 1, 1)
+            if is_fp8
+            else None
+        )
+        v_scale = (
+            fp8_metadata.v_scale.unsqueeze(2)
+            .expand(batch_size, nheads_k, group_size)
+            .reshape(batch_size * nheads_k * group_size, 1, 1)
+            if is_fp8
+            else None
+        )
+        p_scale = (
+            fp8_metadata.p_scale.reshape(batch_size, nheads_k, group_size).reshape(
+                batch_size * nheads_k * group_size, 1, 1
+            )
+            if is_fp8
+            else None
+        )
+        p_inv_scale = (
+            fp8_metadata.p_inv_scale.reshape(batch_size, nheads_k, group_size).reshape(
+                batch_size * nheads_k * group_size, 1, 1
+            )
+            if is_fp8
+            else None
+        )
     else:
         q = q.reshape(batch_size * nheads_q, seq_len_q, head_dim)
         k = k.reshape(batch_size * nheads_k, seq_len_k, head_dim)
         v = v.reshape(batch_size * nheads_k, seq_len_k, head_dim)
         # FP8 scaling
-        is_fp8 = fp8_metadata is not None
         q_scale = fp8_metadata.q_scale.reshape(-1, 1, 1) if is_fp8 else None
         k_scale = fp8_metadata.k_scale.reshape(-1, 1, 1) if is_fp8 else None
         v_scale = fp8_metadata.v_scale.reshape(-1, 1, 1) if is_fp8 else None
