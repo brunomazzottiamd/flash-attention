@@ -19,11 +19,11 @@ def attention_forward_core_ref_impl(q, k, v, sm_scale, causal, dropout_p, philox
         print("philox_seed:", philox_seed)
         print("philox_offset:", philox_offset)
         print("use_exp2:", use_exp2)
-        print("q_scale:", q_scale, q_scale.shape if q_scale else "")
-        print("k_scale:", k_scale, k_scale.shape if k_scale else "")
-        print("v_scale:", v_scale, v_scale.shape if v_scale else "")
-        print("p_scale:", p_scale, p_scale.shape if p_scale else "")
-        print("p_inv_scale:", p_inv_scale, p_inv_scale.shape if p_inv_scale else "")
+        print("q_scale:", q_scale, q_scale.shape if q_scale else None)
+        print("k_scale:", k_scale, k_scale.shape if k_scale else None)
+        print("v_scale:", v_scale, v_scale.shape if v_scale else None)
+        print("p_scale:", p_scale, p_scale.shape if p_scale else None)
+        print("p_inv_scale:", p_inv_scale, p_inv_scale.shape if p_inv_scale else None)
 
     # cast to float32
     q = q.to(torch.float32)
@@ -461,7 +461,7 @@ def attention_forward_pytorch_ref_impl(
     if fp8_metadata is not None:
         q, k, v = q.to(torch.float32), k.to(torch.float32), v.to(torch.float32)
 
-    # compute reference
+     # compute reference
     if layout == "thd":
         o_ref, softmax_lse_ref, sd_mask_ref = attention_varlen_forward_pytorch_ref_impl(
             q.clone(), 
@@ -482,21 +482,18 @@ def attention_forward_pytorch_ref_impl(
             fp8_metadata=fp8_metadata,
         )
     else:
-        o_ref, softmax_lse_ref, sd_mask_ref = attention_vanilla_forward_pytorch_ref_impl(
-            q.clone(),
-            k.clone(),
-            v.clone(),
-            sm_scale,
-            causal,
-            layout,
-            dropout_p,
-            philox_seed,
-            philox_offset,
-            use_exp2,
-            output_dtype=output_dtype,
-            fp8_metadata=fp8_metadata,
-        )
-
+        o_ref, softmax_lse_ref, sd_mask_ref = attention_vanilla_forward_pytorch_ref_impl(q.clone(),
+                                                       k.clone(),
+                                                       v.clone(),
+                                                       sm_scale,
+                                                       causal,
+                                                       layout,
+                                                       dropout_p,
+                                                       philox_seed,
+                                                       philox_offset,
+                                                       use_exp2,
+                                                       output_dtype=output_dtype,
+                                                       fp8_metadata=fp8_metadata)
     if DEBUG:
         print()
         print("attention_forward_pytorch_ref_impl outputs")
