@@ -100,10 +100,10 @@ def _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stri
                 size_n = start_n + OFFS_N[None, :]
                 mask = size_n < boundary_m[:, None]
                 qk = tl.where(mask, qk, float("-inf"))
-
+        
         # -- compute qk ----
         qk += tl.dot(q, k)
-        qk_scaled = qk * SM_SCALE
+        qk_scaled =  qk * SM_SCALE
         if IS_FP8:
             qk_scaled *= q_scale * k_scale  # descale qk after matmul if quantized
 
@@ -173,12 +173,10 @@ def _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stri
         l_i = l_i * alpha + l_ij
         # update m_i and l_i
         m_i = m_ij
-
         if IS_FP8:
             acc += (tl.dot((p * p_inv_scale).to(v.type.element_ty), v) * p_scale * v_scale).to(tl.float32)
         else:
             acc += tl.dot(p.to(v.type.element_ty), v).to(tl.float32)
-
         k_ptrs += BLOCK_N * stride_kn
         v_ptrs += BLOCK_N * stride_vk
         if bias_ptrs is not None:
@@ -406,12 +404,11 @@ def attn_fwd(Q, K, V, bias,
         q_ptrs_mask = q_ptrs_mask & (offs_d[None, :] < ACTUAL_BLOCK_DMODEL)
     q = tl.load(q_ptrs, mask=q_ptrs_mask, other=0.0)
 
-    # if IS FP8 get q_scale and quantize
+    # Load scale factors if IS_FP8.
     if IS_FP8:
         q_scale = tl.load(Q_SCALE + off_z * stride_qscale_z + off_h_q)
         k_scale = tl.load(K_SCALE + off_z * stride_kvscale_z + off_h_k)
         v_scale = tl.load(V_SCALE + off_z * stride_kvscale_z + off_h_k)
-        # TODO: Which head offset is the correct one? Q or KV?
         p_scale = tl.load(P_SCALE + off_z * stride_pscale_z + off_h_q)
         p_inv_scale = tl.load(P_INV_SCALE + off_z * stride_pinvscale_z + off_h_q)
     else:
@@ -447,7 +444,7 @@ def attn_fwd(Q, K, V, bias,
                                         False, BLOCK_M, BLOCK_DMODEL, BLOCK_N, offs_m, offs_n,
                                         # _, MASK_STEPS, ...
                                         PRE_LOAD_V, False, ENABLE_DROPOUT, PADDED_HEAD,
-                                        ACTUAL_BLOCK_DMODEL, SM_SCALE, USE_EXP2=USE_EXP2, RETURN_SCORES=RETURN_SCORES)
+                                        ACTUAL_BLOCK_DMODEL, SM_SCALE,  USE_EXP2=USE_EXP2, RETURN_SCORES=RETURN_SCORES)
         block_min = block_max
         block_max = n_blocks * BLOCK_N
 
@@ -663,15 +660,15 @@ def attention_prefill_forward_triton_impl(
         alibi_strides = (0, 0)
 
     attn_fwd[grid](q, k, v, bias,
-                   q_scale, k_scale, v_scale, p_scale, p_inv_scale, q_scale_stride_z, kv_scale_stride_z, p_scale_stride_z, p_inv_scale_stride_z,
-                   sm_scale, softmax_lse, o, *q_strides, *k_strides, *v_strides, *o_strides,
-                   *bias_strides, *alibi_strides, *scores_strides, stride_lse_z, stride_lse_h, stride_lse_m, cu_seqlens_q, cu_seqlens_k,
-                   dropout_p=dropout_p, philox_seed=philox_seed, philox_offset_base=philox_offset, sd_mask=sd_mask, dropout_mask=dropout_mask, alibi_slopes=alibi_slopes,
-                   HQ=nheads_q, HK=nheads_k, ACTUAL_BLOCK_DMODEL=head_size, MAX_SEQLENS_Q=max_seqlens_q,
-                   MAX_SEQLENS_K=max_seqlens_k, IS_CAUSAL=causal, VARLEN=is_varlen,
-                   BLOCK_DMODEL=padded_d_model, USE_BIAS=False if bias is None else True,
-                   USE_ALIBI=False if alibi_slopes is None else True, ENABLE_DROPOUT=dropout_p > 0.0,
-                   USE_EXP2=use_exp2, RETURN_SCORES=return_softmax, IS_FP8=is_fp8)
+                    q_scale, k_scale, v_scale, p_scale, p_inv_scale, q_scale_stride_z, kv_scale_stride_z, p_scale_stride_z, p_inv_scale_stride_z,
+                    sm_scale, softmax_lse, o, *q_strides, *k_strides, *v_strides, *o_strides,
+                    *bias_strides, *alibi_strides, *scores_strides, stride_lse_z, stride_lse_h, stride_lse_m, cu_seqlens_q, cu_seqlens_k,
+                    dropout_p=dropout_p, philox_seed=philox_seed, philox_offset_base=philox_offset, sd_mask=sd_mask, dropout_mask=dropout_mask, alibi_slopes=alibi_slopes,
+                    HQ=nheads_q, HK=nheads_k, ACTUAL_BLOCK_DMODEL=head_size, MAX_SEQLENS_Q=max_seqlens_q,
+                    MAX_SEQLENS_K=max_seqlens_k, IS_CAUSAL=causal, VARLEN=is_varlen,
+                    BLOCK_DMODEL=padded_d_model, USE_BIAS=False if bias is None else True,
+                    USE_ALIBI=False if alibi_slopes is None else True, ENABLE_DROPOUT=dropout_p
+                    > 0.0, USE_EXP2=use_exp2, RETURN_SCORES=return_softmax, IS_FP8=is_fp8)
 
     if DEBUG:
         print()
