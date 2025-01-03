@@ -494,6 +494,7 @@ def attention_forward_pytorch_ref_impl(
                                                        use_exp2,
                                                        output_dtype=output_dtype,
                                                        fp8_metadata=fp8_metadata)
+
     if DEBUG:
         print()
         print("attention_forward_pytorch_ref_impl outputs")

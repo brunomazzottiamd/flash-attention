@@ -426,7 +426,7 @@ def test_op_prefill_fwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropou
                                                 metadata.layout, 
                                                 metadata.cu_seqlens_q, 
                                                 metadata.cu_seqlens_k,
-                                                metadata.max_seqlens_q,
+                                                metadata.max_seqlens_q, 
                                                 metadata.max_seqlens_k,
                                                 metadata.dropout_p,
                                                 metadata.philox_seed, 
@@ -509,7 +509,7 @@ def test_op_prefill_fwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropou
         (4, 6, 6, 2048, 2048, 32),
     ],
 )
-@pytest.mark.parametrize("causal", [True, False])  # FIXME: There are some mismatches for causal.
+@pytest.mark.parametrize("causal", [True, False])
 @pytest.mark.parametrize("dropout_p", [0.0])
 @pytest.mark.parametrize("layout", ["bhsd", "bshd", "thd"])
 @pytest.mark.parametrize("use_exp2", [True, False])
