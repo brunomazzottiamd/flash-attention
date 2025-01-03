@@ -380,11 +380,12 @@ def test_op_bwd(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, torch_sdpa_test, use_ali
 @pytest.mark.parametrize('causal', [True, False])
 @pytest.mark.parametrize('dropout_p', [0.0])
 @pytest.mark.parametrize('layout', ["bhsd", "bshd", "thd"])
-@pytest.mark.parametrize('use_exp2', [True, False])
-@pytest.mark.parametrize('DEBUG_INPUT', [False])  # NOTE: debug input can overflow when the tensors are large. Just use to figure out issues.
+@pytest.mark.parametrize('use_exp2', [True, False]) # works when use_exp2 is false
+@pytest.mark.parametrize('DEBUG_INPUT', [False]) # NOTE: debug input can overflow when the tensors are large. Just use to figure out issues
 def test_op_prefill_fwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, layout, use_exp2, DEBUG_INPUT):
     dtype = torch.float16
     torch.manual_seed(0)
+    alibi_slopes = None
     device = "cuda"
 
     if layout == "thd":
@@ -411,45 +412,48 @@ def test_op_prefill_fwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropou
     if dropout_p > 0.0:
         metadata.need_dropout(dropout_p)
 
+
     # call Triton's forward implementation directly
     output_triton, softmax_lse_triton, sd_mask_triton = attention_prefill_forward_triton_impl(
-                                                q,
-                                                k,
-                                                v,
-                                                output_triton,
-                                                metadata.sm_scale,
-                                                metadata.alibi_slopes,
-                                                metadata.causal,
-                                                metadata.bias,
-                                                metadata.layout,
-                                                metadata.cu_seqlens_q,
+                                                q, 
+                                                k, 
+                                                v, 
+                                                output_triton, 
+                                                metadata.sm_scale, 
+                                                metadata.alibi_slopes, 
+                                                metadata.causal, 
+                                                metadata.bias, 
+                                                metadata.layout, 
+                                                metadata.cu_seqlens_q, 
                                                 metadata.cu_seqlens_k,
                                                 metadata.max_seqlens_q,
                                                 metadata.max_seqlens_k,
                                                 metadata.dropout_p,
-                                                metadata.philox_seed,
-                                                metadata.philox_offset,
-                                                metadata.return_scores,
+                                                metadata.philox_seed, 
+                                                metadata.philox_offset, 
+                                                metadata.return_scores, 
                                                 metadata.use_exp2)
 
-    output_ref, softmax_lse_ref, sd_mask_ref = attention_forward_pytorch_ref_impl(
-        q, k, v,
-        metadata.sm_scale,
-        causal,
+    output_ref, softmax_lse_ref, sd_mask_ref  = attention_forward_pytorch_ref_impl(
+        q.clone(), 
+        k.clone(), 
+        v.clone(), 
+        metadata.sm_scale, 
+        causal, 
         layout,
         metadata.cu_seqlens_q,
         metadata.cu_seqlens_k,
         metadata.max_seqlens_q,
         metadata.max_seqlens_k,
         metadata.dropout_p,
-        metadata.philox_seed,
-        metadata.philox_offset,
+        metadata.philox_seed, 
+        metadata.philox_offset, 
         use_exp2
     )
 
     if DEBUG:
         print()
-        print("Compare Triton Impl with reference Pytorch Impl")
+        print("Compare Triton Impl with refernce Pytorch Impl")
 
     # this can be set to true manually or when using dropout
     if metadata.return_scores:
@@ -462,7 +466,7 @@ def test_op_prefill_fwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropou
         print("softmax_lse_triton:", softmax_lse_triton, softmax_lse_triton.shape)
         print("softmax_lse_ref:", softmax_lse_ref, softmax_lse_ref.shape)
     torch.testing.assert_close(softmax_lse_triton, softmax_lse_ref, atol=ATOL, rtol=RTOL)
-
+    
     if DEBUG:
         print("output_triton:", output_triton, output_triton.shape)
         print("output_ref:", output_ref, output_ref.shape)
