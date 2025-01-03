@@ -174,9 +174,9 @@ def _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stri
         # update m_i and l_i
         m_i = m_ij
         if IS_FP8:
-            acc += (tl.dot((p * p_inv_scale).to(v.type.element_ty), v) * p_scale * v_scale).to(tl.float32)
+            acc += tl.dot((p * p_inv_scale).to(v.type.element_ty), v) * p_scale * v_scale
         else:
-            acc += tl.dot(p.to(v.type.element_ty), v).to(tl.float32)
+            acc += tl.dot(p.to(v.type.element_ty), v)
         k_ptrs += BLOCK_N * stride_kn
         v_ptrs += BLOCK_N * stride_vk
         if bias_ptrs is not None:
