@@ -21,8 +21,29 @@ FP8_MAX: dict[torch.dtype, float] = {
     for dtype in FP8_TYPES
 }
 
+DEFAULT_SCALE_PER_HEAD: bool = True
+
 
 def check_is_fp8(x: Tensor, *xs: Tensor) -> bool:
+    """
+    Checks whether the given tensors are of FP8 data types.
+
+    This function determines if any of the input tensors have a data type
+    matching one of the FP8 types defined in `FP8_TYPES`. If the environment
+    variable `FLASH_ATTENTION_TRITON_AMD_REMOVE_QUANT_SCALE` is set to a
+    truthy value, the function always returns `False`,  effectively disabling FP8
+    type detection.
+
+    Args:
+        x (Tensor): The primary tensor to check.
+        *xs (Tensor): Additional tensors to check.
+
+    Returns:
+        bool:
+            - `True` if any of the input tensors have an FP8 data type and
+              quantization scaling is not disabled.
+            - `False` otherwise.
+    """
     if REMOVE_QUANTIZATION_SCALING:
         return False  # makes all methods believe they aren't working with fp8s, so no scaling is applied
     return any(y.dtype in FP8_TYPES for y in (x,) + xs)
@@ -32,31 +53,38 @@ def create_fp8_scale_tensors(
     q: Tensor, k: Tensor, v: Tensor, layout: str,
     cu_seqlens_q: Optional[Tensor] = None, cu_seqlens_k: Optional[Tensor] = None,
     max_seqlen_q: Optional[int] = None, max_seqlen_k: Optional[int] = None,
-    scale_per_head: bool = False, eps: float = 1e-9,
+    scale_per_head: bool = DEFAULT_SCALE_PER_HEAD, eps: float = 1e-9,
 ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
     """
     Create scale tensors for q, k and v based on the scaling configuration.
 
     Args:
-    q (torch.Tensor): Query tensor.
-    k (torch.Tensor): Key tensor.
-    v (torch.Tensor): Value tensor.
-    layout (str): Tensor layout, can be "bhsd", "bshd" or "thd".
-    cu_seqlens_q (Optional[torch.Tensor]): Cumulative Q sequence length. Used with "thd" varlen layout.
-    cu_seqlens_k (Optional[torch.Tensor]): Cumulative KV sequence length. Used with "thd" varlen layout.
-    max_seqlen_q (Optional[int]): Max. Q sequence length. Used with "thd" varlen layout.
-    max_seqlen_k (Optional[int]): Max. KV sequence length. Used with "thd" varlen layout.
-    scale_per_head (bool): Whether to compute scale per head or globally. Defaults to False.
-    eps (float): If the maximum absolute value of a tensor is zero, this contant avoids
-                 division by zero while scaling. Defaults to 1e-9.
+        q (torch.Tensor): Query tensor.
+        k (torch.Tensor): Key tensor.
+        v (torch.Tensor): Value tensor.
+        layout (str): Tensor layout, can be `"bhsd"`, `"bshd"` or `"thd"`.
+        cu_seqlens_q (Optional[torch.Tensor]): Cumulative Q sequence length.
+            Used with `"thd"` varlen layout.
+        cu_seqlens_k (Optional[torch.Tensor]): Cumulative KV sequence length.
+            Used with `"thd"` varlen layout.
+        max_seqlen_q (Optional[int]): Max. Q sequence length.
+            Used with `"thd"` varlen layout.
+        max_seqlen_k (Optional[int]): Max. KV sequence length.
+            Used with `"thd"` varlen layout.
+        scale_per_head (bool): Whether to compute scale per head or globally.
+            Defaults to `DEFAULT_SCALE_PER_HEAD.`
+        eps (float): If the maximum absolute value of a tensor is zero, this
+            contant avoids division by zero while scaling. Defaults to 1e-9.
 
     Returns:
-    tuple of torch.Tensor: (q_scale, k_scale, v_scale, p_scale, p_inv_scale)
-    To perform fp8 quantization you should divide by scale factor (x_quant = x / x_scale).
-    To perform fp8 dequantization, your should multiply by scale factor (x = x_quant * x_scale).
-    p_scale and p_inv_scale are related to intermediate FA computation
-    p = softmax(matmul(q, transpose(k))).
-    All scale tensors are float32 ones.
+        tuple of 2D torch.Tensor: `(q_scale, k_scale, v_scale, p_scale, p_inv_scale)`.
+        To perform fp8 quantization you should divide by scale factor `(x_quant = x / x_scale)`.
+        To perform fp8 dequantization, your should multiply by scale factor `(x = x_quant * x_scale)`.
+        p_scale and p_inv_scale are related to intermediate FA computation
+        `p = softmax(matmul(q, transpose(k)))`.
+        All scale tensors are `float32` ones.
+        `q_scale`, `p_scale` and `p_inv_scale` have `(BATCH, HEADS_Q)` shape.
+        `k_scale` and `v_scale` have `(BATCH, HEADS_K)` shape.
     """
     assert layout in ["bhsd", "bshd", "thd"], "Unknow layout."
     is_varlen = layout == "thd"
@@ -77,9 +105,8 @@ def create_fp8_scale_tensors(
         q_scale = torch.ones((batch, head_q), dtype=torch.float32, device=q.device)
         k_scale = torch.ones((batch, head_k), dtype=torch.float32, device=k.device)
         v_scale = torch.ones((batch, head_k), dtype=torch.float32, device=v.device)
-        # TODO: Which number of heads is the correct one? Q or KV?
         p_scale = torch.ones((batch, head_q), dtype=torch.float32, device="cuda")
-        p_inv_scale = p_scale
+        p_inv_scale = torch.ones((batch, head_q), dtype=torch.float32, device="cuda")
 
     else:
         # Handle float8 dtype special case.
@@ -120,9 +147,9 @@ def create_fp8_scale_tensors(
 
                 # Compute max for each batch-head pair.
                 # Compute max across seqlen and dim.
-                q_scale = torch.maximum(q_float32.abs().amax(dim=(seqlen_loc, dim_loc)), teps)  # Shape: (BATCH, HEAD)
-                k_scale = torch.maximum(k_float32.abs().amax(dim=(seqlen_loc, dim_loc)), teps)  # Shape: (BATCH, HEAD)
-                v_scale = torch.maximum(v_float32.abs().amax(dim=(seqlen_loc, dim_loc)), teps)  # Shape: (BATCH, HEAD)
+                q_scale = torch.maximum(q_float32.abs().amax(dim=(seqlen_loc, dim_loc)), teps)
+                k_scale = torch.maximum(k_float32.abs().amax(dim=(seqlen_loc, dim_loc)), teps)
+                v_scale = torch.maximum(v_float32.abs().amax(dim=(seqlen_loc, dim_loc)), teps)
 
         # Divide max tensors by respective data type max.
         q_scale = q_scale / FP8_MAX[q.dtype]
@@ -130,7 +157,6 @@ def create_fp8_scale_tensors(
         v_scale = v_scale / FP8_MAX[v.dtype]
 
         # Compute p_scale.
-        # TODO: Which number of heads is the correct one? Q or KV?
         p_scale = torch.full((batch, head_q), 1 / FP8_MAX[q.dtype], dtype=torch.float32, device="cuda")
         p_inv_scale = 1 / p_scale
 
@@ -141,6 +167,25 @@ def scale_fp8(
     x: Tensor, x_scale: Tensor, layout: str,
     cu_seqlens: Optional[Tensor] = None,
 ) -> Tensor:
+    """
+    Scales an FP8 tensor using a specified scaling factor.
+
+    This function scales the input tensor `x` by dividing it by the scaling factor `x_scale`,
+    while considering the specified tensor layout.
+
+    If the input tensor `x` is not an FP8 tensor, the function returns it unchanged.
+    For FP8 tensors, the result is clamped to the representable range of the FP8 data type.
+
+    Args:
+        x (Tensor): The input tensor to be scaled.
+        x_scale (Tensor): The scaling factor tensor, broadcasted as needed based on `layout`.
+        layout (str): The data layout of the tensor. Must be one of `"bhsd"`, `"bshd"`, or `"thd"`.
+        cu_seqlens (Optional[Tensor], optional): Cumulative sequence lengths for variable-length
+            sequences. Required when `layout` is `"thd"`.
+
+    Returns:
+        Tensor: The scaled tensor.
+    """
     assert layout in ["bhsd", "bshd", "thd"], "Unknow layout."
     assert (layout == "thd" and cu_seqlens is not None) or layout != "thd", "cu_seqlens is required for varlen layout."
     if not check_is_fp8(x):
@@ -164,6 +209,25 @@ def scale_fp8(
 
 
 class Fp8MetaData:
+    """
+    Manages FP8 scaling metadata and scaled tensors for query, key, and value.
+
+    Attributes:
+        scale_per_head (bool): Indicates if scaling is applied per bath / head.
+        q_scale (Tensor): Scaling factor for the query tensor.
+        k_scale (Tensor): Scaling factor for the key tensor.
+        v_scale (Tensor): Scaling factor for the value tensor.
+        p_scale (Tensor): Scaling factor for intermediate FA computation
+            `p = softmax(matmul(q, transpose(k)))`.
+        p_inv_scale (Tensor): Inverse of `p_scale`.
+        q_scaled (Tensor): Scaled query tensor.
+        k_scaled (Tensor): Scaled key tensor.
+        v_scaled (Tensor): Scaled value tensor.
+
+    Methods:
+        __init__: Initializes scaling metadata and applies scaling to tensors.
+    """
+
     scale_per_head: bool
     q_scale: Tensor
     k_scale: Tensor
@@ -177,7 +241,7 @@ class Fp8MetaData:
     def __init__(
         self,
         q: Tensor, k: Tensor, v: Tensor, layout: str, metadata: MetaData,
-        scale_per_head: bool = True,
+        scale_per_head: bool = DEFAULT_SCALE_PER_HEAD,
     ) -> None:
         self.scale_per_head = scale_per_head
         self.q_scale, self.k_scale, self.v_scale, self.p_scale, self.p_inv_scale = create_fp8_scale_tensors(
