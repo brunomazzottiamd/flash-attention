@@ -54,7 +54,7 @@ def create_fp8_scale_tensors(
     cu_seqlens_q: Optional[Tensor] = None, cu_seqlens_k: Optional[Tensor] = None,
     max_seqlen_q: Optional[int] = None, max_seqlen_k: Optional[int] = None,
     scale_per_head: bool = DEFAULT_SCALE_PER_HEAD, eps: float = 1e-9,
-) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
+) -> tuple[Tensor, Tensor, Tensor, Tensor]:
     """
     Create scale tensors for q, k and v based on the scaling configuration.
 
@@ -77,13 +77,13 @@ def create_fp8_scale_tensors(
             constant avoids division by zero while scaling. Defaults to 1e-9.
 
     Returns:
-        tuple of 2D torch.Tensor: `(q_scale, k_scale, v_scale, p_scale, p_inv_scale)`.
-        To perform fp8 quantization you should divide by scale factor `(x_quant = x / x_scale)`.
-        To perform fp8 dequantization, your should multiply by scale factor `(x = x_quant * x_scale)`.
-        p_scale and p_inv_scale are related to intermediate FA computation
-        `p = softmax(matmul(q, transpose(k)))`.
+        tuple of 2D torch.Tensor: `(q_scale, k_scale, v_scale, p_scale)`.
+        To perform fp8 quantization, you should multiply by scale factor `(x_quant = x * x_scale)`.
+        To perform fp8 dequantization, you should multiply by reciprocal of scale factor
+        `(x = x_quant * (1 / x_scale))`.
+        `p_scale` is related to intermediate FA computation `p = softmax(matmul(q, transpose(k)))`.
         All scale tensors are `float32` ones.
-        `q_scale`, `p_scale` and `p_inv_scale` have `(BATCH, HEADS_Q)` shape.
+        `q_scale` and `p_scale` have `(BATCH, HEADS_Q)` shape.
         `k_scale` and `v_scale` have `(BATCH, HEADS_K)` shape.
     """
     assert layout in ["bhsd", "bshd", "thd"], "Unknow layout."
@@ -106,7 +106,6 @@ def create_fp8_scale_tensors(
         k_scale = torch.ones((batch, head_k), dtype=torch.float32, device=k.device)
         v_scale = torch.ones((batch, head_k), dtype=torch.float32, device=v.device)
         p_scale = torch.ones((batch, head_q), dtype=torch.float32, device="cuda")
-        p_inv_scale = torch.ones((batch, head_q), dtype=torch.float32, device="cuda")
 
     else:
         # Handle float8 dtype special case.
@@ -152,15 +151,14 @@ def create_fp8_scale_tensors(
                 v_scale = torch.maximum(v_float32.abs().amax(dim=(seqlen_loc, dim_loc)), teps)
 
         # Divide max tensors by respective data type max.
-        q_scale = q_scale / FP8_MAX[q.dtype]
-        k_scale = k_scale / FP8_MAX[k.dtype]
-        v_scale = v_scale / FP8_MAX[v.dtype]
+        q_scale = FP8_MAX[q.dtype] / q_scale
+        k_scale = FP8_MAX[k.dtype] / k_scale
+        v_scale = FP8_MAX[v.dtype] / v_scale
 
         # Compute p_scale.
-        p_scale = torch.full((batch, head_q), 1 / FP8_MAX[q.dtype], dtype=torch.float32, device="cuda")
-        p_inv_scale = 1 / p_scale
+        p_scale = torch.full((batch, head_q), FP8_MAX[q.dtype], dtype=torch.float32, device="cuda")
 
-    return q_scale, k_scale, v_scale, p_scale, p_inv_scale
+    return q_scale, k_scale, v_scale, p_scale
 
 
 def scale_fp8(
@@ -195,12 +193,12 @@ def scale_fp8(
     # Fraction denominator is the broadcasted scaled factor.
     x_scale = x_scale.detach()
     if layout == "bhsd":
-        x_scaled = n / x_scale[:, :, None, None]
+        x_scaled = n * x_scale[:, :, None, None]
     elif layout == "bshd":
-        x_scaled = n / x_scale[:, None, :, None]
+        x_scaled = n * x_scale[:, None, :, None]
     elif layout == "thd":
         x_scaled = torch.cat([
-            n[s:e] / x_scale[z, :].unsqueeze(0).unsqueeze(-1)
+            n[s:e] * x_scale[z, :].unsqueeze(0).unsqueeze(-1)
             for z, (s, e) in enumerate(zip(cu_seqlens[:-1], cu_seqlens[1:]))
         ], dim=0)
     # Clamp and convert back to float8.
@@ -219,6 +217,9 @@ class Fp8MetaData:
         v_scale (Tensor): Scaling factor for the value tensor.
         p_scale (Tensor): Scaling factor for intermediate FA computation
             `p = softmax(matmul(q, transpose(k)))`.
+        q_inv_scale (Tensor): Inverse of `q_scale`.
+        k_inv_scale (Tensor): Inverse of `k_scale`.
+        v_inv_scale (Tensor): Inverse of `v_scale`.
         p_inv_scale (Tensor): Inverse of `p_scale`.
         q_scaled (Tensor): Scaled query tensor.
         k_scaled (Tensor): Scaled key tensor.
@@ -233,6 +234,9 @@ class Fp8MetaData:
     k_scale: Tensor
     v_scale: Tensor
     p_scale: Tensor
+    q_inv_scale: Tensor
+    k_inv_scale: Tensor
+    v_inv_scale: Tensor
     p_inv_scale: Tensor
     q_scaled: Tensor
     k_scaled: Tensor
@@ -244,12 +248,16 @@ class Fp8MetaData:
         scale_per_head: bool = DEFAULT_SCALE_PER_HEAD,
     ) -> None:
         self.scale_per_head = scale_per_head
-        self.q_scale, self.k_scale, self.v_scale, self.p_scale, self.p_inv_scale = create_fp8_scale_tensors(
+        self.q_scale, self.k_scale, self.v_scale, self.p_scale = create_fp8_scale_tensors(
             q, k, v, layout,
             cu_seqlens_q=metadata.cu_seqlens_q, cu_seqlens_k=metadata.cu_seqlens_k,
             max_seqlen_q=metadata.max_seqlens_q, max_seqlen_k=metadata.max_seqlens_k,
             scale_per_head=scale_per_head,
         )
+        self.q_inv_scale = 1 / self.q_scale
+        self.k_inv_scale = 1 / self.k_scale
+        self.v_inv_scale = 1 / self.v_scale
+        self.p_inv_scale = 1 / self.p_scale
         self.q_scaled = scale_fp8(q, self.q_scale, layout, cu_seqlens=metadata.cu_seqlens_q)
         self.k_scaled = scale_fp8(k, self.k_scale, layout, cu_seqlens=metadata.cu_seqlens_k)
         self.v_scaled = scale_fp8(v, self.v_scale, layout, cu_seqlens=metadata.cu_seqlens_k)
