@@ -74,7 +74,7 @@ def create_fp8_scale_tensors(
         scale_per_head (bool): Whether to compute scale per head or globally.
             Defaults to `DEFAULT_SCALE_PER_HEAD.`
         eps (float): If the maximum absolute value of a tensor is zero, this
-            contant avoids division by zero while scaling. Defaults to 1e-9.
+            constant avoids division by zero while scaling. Defaults to 1e-9.
 
     Returns:
         tuple of 2D torch.Tensor: `(q_scale, k_scale, v_scale, p_scale, p_inv_scale)`.
@@ -213,7 +213,7 @@ class Fp8MetaData:
     Manages FP8 scaling metadata and scaled tensors for query, key, and value.
 
     Attributes:
-        scale_per_head (bool): Indicates if scaling is applied per bath / head.
+        scale_per_head (bool): Indicates if scaling is applied per batch / head.
         q_scale (Tensor): Scaling factor for the query tensor.
         k_scale (Tensor): Scaling factor for the key tensor.
         v_scale (Tensor): Scaling factor for the value tensor.
