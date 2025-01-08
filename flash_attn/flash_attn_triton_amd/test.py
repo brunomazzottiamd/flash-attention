@@ -631,22 +631,28 @@ def test_op_prefill_fwd_impl_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD,
             print("sd_mask_triton_fp8:", sd_mask_triton_fp8, sd_mask_triton_fp8.shape)
             print("sd_mask_triton_fp16:", sd_mask_triton_fp16, sd_mask_triton_fp16.shape)
             print("sd_mask_ref_fp8:", sd_mask_ref_fp8, sd_mask_ref_fp8.shape)
-        torch.testing.assert_close(sd_mask_triton_fp8.to(output_dtype), sd_mask_ref_fp8.to(output_dtype), atol=ref_atol, rtol=rtol)
-        torch.testing.assert_close(sd_mask_triton_fp8.to(output_dtype), sd_mask_triton_fp16.to(output_dtype), atol=fp16_atol, rtol=rtol)
+        torch.testing.assert_close(sd_mask_triton_fp8.to(output_dtype), sd_mask_ref_fp8.to(output_dtype), atol=ref_atol, rtol=rtol,
+                                   msg=lambda msg: f"sd_mask: fp8 Triton vs fp32 PyTorch reference with scaling\n\n{msg}")
+        torch.testing.assert_close(sd_mask_triton_fp8.to(output_dtype), sd_mask_triton_fp16.to(output_dtype), atol=fp16_atol, rtol=rtol,
+                                   msg=lambda msg: f"sd_mask: fp8 Triton vs fp16 Triton\n\n{msg}")
 
     if DEBUG:
         print("softmax_lse_triton_fp8:", softmax_lse_triton_fp8, softmax_lse_triton_fp8.shape)
         print("softmax_lse_triton_fp16:", softmax_lse_triton_fp16, softmax_lse_triton_fp16.shape)
         print("softmax_lse_ref_fp8:", softmax_lse_ref_fp8, softmax_lse_ref_fp8.shape)
-    torch.testing.assert_close(softmax_lse_triton_fp8.to(torch.float32), softmax_lse_ref_fp8.to(torch.float32), atol=ref_atol, rtol=rtol)
-    torch.testing.assert_close(softmax_lse_triton_fp8.to(torch.float32), softmax_lse_triton_fp16.to(torch.float32), atol=fp16_atol, rtol=rtol)
+    torch.testing.assert_close(softmax_lse_triton_fp8.to(torch.float32), softmax_lse_ref_fp8.to(torch.float32), atol=ref_atol, rtol=rtol,
+                               msg=lambda msg: f"softmax_lse: fp8 Triton vs fp32 PyTorch reference with scaling\n\n{msg}")
+    torch.testing.assert_close(softmax_lse_triton_fp8.to(torch.float32), softmax_lse_triton_fp16.to(torch.float32), atol=fp16_atol, rtol=rtol,
+                               msg=lambda msg: f"softmax_lse: fp8 Triton vs fp16 Triton\n\n{msg}")
 
     if DEBUG:
         print("output_triton_fp8:", output_triton_fp8, output_triton_fp8.shape)
         print("output_triton_fp16:", output_triton_fp16, output_triton_fp16.shape)
         print("output_ref_fp8:", output_ref_fp8, output_ref_fp8.shape)
-    torch.testing.assert_close(output_triton_fp8.to(output_dtype), output_ref_fp8.to(output_dtype), atol=ref_atol, rtol=rtol)
-    torch.testing.assert_close(output_triton_fp8.to(output_dtype), output_triton_fp16.to(output_dtype), atol=fp16_atol, rtol=rtol)
+    torch.testing.assert_close(output_triton_fp8.to(output_dtype), output_ref_fp8.to(output_dtype), atol=ref_atol, rtol=rtol,
+                               msg=lambda msg: f"output: fp8 Triton vs fp32 PyTorch reference with scaling\n\n{msg}")
+    torch.testing.assert_close(output_triton_fp8.to(output_dtype), output_triton_fp16.to(output_dtype), atol=fp16_atol, rtol=rtol,
+                               msg=lambda msg: f"output: fp8 Triton vs fp16 Triton\n\n{msg}")
 
 
 @pytest.mark.parametrize(
