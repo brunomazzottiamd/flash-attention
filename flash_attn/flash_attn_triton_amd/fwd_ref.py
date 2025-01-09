@@ -5,7 +5,6 @@ from .utils import DEBUG
 DEBUG_CORE = False
 
 def attention_forward_core_ref_impl(q, k, v, sm_scale, causal, dropout_p, philox_seed, philox_offset, use_exp2,
-                                    output_dtype=torch.float16,
                                     q_inv_scale=None, k_inv_scale=None, v_inv_scale=None, p_inv_scale=None, p_scale=None):
     if DEBUG_CORE:
         print()
@@ -150,16 +149,16 @@ def attention_forward_core_ref_impl(q, k, v, sm_scale, causal, dropout_p, philox
     if DEBUG_CORE:
         print("o:", o, o.shape)
 
-    # cast to desired output dtype
-    o = o.to(output_dtype)
-    # softmax_lse = softmax_lse.to(output_dtype) # NOTE: if you cast lse to fp16 it cause accuracy issues. keep fp32
-    sd_mask = sd_mask.to(output_dtype)
+    # cast back to original dtype
+    o = o.to(torch.float16)
+    # softmax_lse = softmax_lse.to(torch.float16) # NOTE: if you cast lse to fp16 it cause accuracy issues. keep fp32
+    sd_mask = sd_mask.to(torch.float16)
 
     return o, softmax_lse, sd_mask
 
 
 def attention_vanilla_forward_pytorch_ref_impl(q, k, v, sm_scale, causal, layout, dropout_p, philox_seed, philox_offset, use_exp2,
-                                               output_dtype=torch.float16, fp8_metadata=None):
+                                               fp8_metadata=None):
     """Compute reference output and softmax_lse using PyTorch's built-in function"""
     # Ensure the layout is 'bhsd'
     if layout == "bshd":
@@ -240,7 +239,6 @@ def attention_vanilla_forward_pytorch_ref_impl(q, k, v, sm_scale, causal, layout
     # Call the core attention function
     o, softmax_lse, sd_mask = attention_forward_core_ref_impl(
         q, k, v, sm_scale, causal, dropout_p, philox_seed, philox_offset, use_exp2,
-        output_dtype=output_dtype,
         q_inv_scale=q_inv_scale, k_inv_scale=k_inv_scale, v_inv_scale=v_inv_scale, p_inv_scale=p_inv_scale, p_scale=p_scale,
     )
 
@@ -280,7 +278,6 @@ def attention_varlen_forward_pytorch_ref_impl(
     philox_seed, 
     philox_offset,
     use_exp2,
-    output_dtype=torch.float16,
     fp8_metadata=None,
 ):
     # Ensure the layout is 'thd'
@@ -389,7 +386,6 @@ def attention_varlen_forward_pytorch_ref_impl(
         # Call the core attention function for this sequence
         o_i, softmax_lse_i, sd_mask_i = attention_forward_core_ref_impl(
             q_i, k_i, v_i, sm_scale, causal, dropout_p, philox_seed, philox_offset, use_exp2,
-            output_dtype=output_dtype,
             q_inv_scale=q_inv_scale, k_inv_scale=k_inv_scale, v_inv_scale=v_inv_scale, p_inv_scale=p_inv_scale, p_scale=p_scale,
         )
 
@@ -435,7 +431,6 @@ def attention_forward_pytorch_ref_impl(
     philox_seed,
     philox_offset,
     use_exp2,
-    output_dtype=torch.float16,
     fp8_metadata=None
 ):
     if DEBUG:
@@ -455,7 +450,6 @@ def attention_forward_pytorch_ref_impl(
         print("philox_seed:", philox_seed)
         print("philox_offset:", philox_offset)
         print("use_exp2:", use_exp2)
-        print("output_dtype:", output_dtype)
 
     # if is fp8 upcast to fp32 for torch ops to be supported
     if fp8_metadata is not None:
@@ -478,7 +472,6 @@ def attention_forward_pytorch_ref_impl(
             philox_seed,
             philox_offset,
             use_exp2,
-            output_dtype=output_dtype,
             fp8_metadata=fp8_metadata,
         )
     else:
@@ -492,7 +485,6 @@ def attention_forward_pytorch_ref_impl(
                                                        philox_seed,
                                                        philox_offset,
                                                        use_exp2,
-                                                       output_dtype=output_dtype,
                                                        fp8_metadata=fp8_metadata)
 
     if DEBUG:

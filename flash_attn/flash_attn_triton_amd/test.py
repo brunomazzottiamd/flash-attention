@@ -514,12 +514,13 @@ def test_op_prefill_fwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropou
 @pytest.mark.parametrize("layout", ["bhsd", "bshd", "thd"])
 @pytest.mark.parametrize("use_exp2", [True, False])
 @pytest.mark.parametrize("scale_per_head", [True, False])
-@pytest.mark.parametrize("input_dtype", [torch.float8_e4m3fnuz])
-@pytest.mark.parametrize("output_dtype", [torch.float16])
 @pytest.mark.parametrize("DEBUG_INPUT", [False])  # NOTE: debug input can overflow when the tensors are large. Just use to figure out issues.
 def test_op_prefill_fwd_impl_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD,
                                  causal, dropout_p, layout, use_exp2, scale_per_head,
-                                 input_dtype, output_dtype, DEBUG_INPUT):
+                                 DEBUG_INPUT):
+    input_dtype = torch.float8_e4m3fnuz
+    output_dtype = torch.float16
+
     # Higher error tolerance:
     # TODO: fp8 error tolerance must not be tweaked.
     atol = 6.641e-02  # still 6.64x default fp16 tolerance, why?
@@ -591,7 +592,6 @@ def test_op_prefill_fwd_impl_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD,
         metadata.philox_seed,
         metadata.philox_offset,
         use_exp2,
-        output_dtype=output_dtype,
         fp8_metadata=fp8_metadata,
     )
 
