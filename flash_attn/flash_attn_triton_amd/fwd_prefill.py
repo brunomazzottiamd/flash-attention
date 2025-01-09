@@ -138,7 +138,7 @@ def _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stri
         p_mask = (OFFS_M[:, None] < actual_seqlen_q) & ((start_n + tl.arange(0, BLOCK_N))[None, :] < actual_seqlen_k)
 
         # CAVEAT: Must update l_ij before applying dropout
-        l_ij = tl.sum(p, 1)  # p is fp32 at this point
+        l_ij = tl.sum(p, 1)
         if ENABLE_DROPOUT:
             if tl_DROPOUT_USE_PYTORCH:
                 dropout_mask = tl.load(dropout_mask_ptrs, mask=p_mask)
@@ -174,9 +174,16 @@ def _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stri
         # update m_i and l_i
         m_i = m_ij
         if IS_FP8:
+            # scale p before matmul and descale after matmul if quantized
             acc += tl.dot((p * p_scale).to(v.type.element_ty), v) * p_inv_scale * v_inv_scale
         else:
             acc += tl.dot(p.to(v.type.element_ty), v)
+        # Warning: the following approach reduces precision
+        # if IS_FP8:
+        #     p *= p_scale  # scale p before matmul if quantized
+        # acc += tl.dot(p.to(v.type.element_ty), v)
+        # if IS_FP8:
+        #     acc *= p_inv_scale * v_inv_scale  # descale acc after matmul if quantized
         k_ptrs += BLOCK_N * stride_kn
         v_ptrs += BLOCK_N * stride_vk
         if bias_ptrs is not None:

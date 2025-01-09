@@ -39,11 +39,11 @@ def attention_forward_core_ref_impl(q, k, v, sm_scale, causal, dropout_p, philox
     if DEBUG_CORE:
         print("attention_scaled_scores:", attention_scaled_scores, attention_scaled_scores.shape)
 
-    # FP8 scaling
+    # FP8 descaling
     if q_inv_scale is not None and k_inv_scale is not None:
-        attention_scaled_scores = attention_scaled_scores * q_inv_scale * k_inv_scale
+        attention_scaled_scores *= q_inv_scale * k_inv_scale
         if DEBUG_CORE:
-            print("attention_scaled_scores after fp8 scaling:", attention_scaled_scores, attention_scaled_scores.shape)
+            print("attention_scaled_scores after fp8 descaling:", attention_scaled_scores, attention_scaled_scores.shape)
 
     # Apply causal mask if necessary
     if causal:
@@ -141,13 +141,19 @@ def attention_forward_core_ref_impl(q, k, v, sm_scale, causal, dropout_p, philox
         print("softmax_lse:", softmax_lse, softmax_lse.shape)
 
     # Compute output
-    if v_inv_scale is not None and p_inv_scale is not None and p_scale is not None:
-        # FP8 scaling
-        o = torch.matmul(p * p_scale, v) * p_inv_scale * v_inv_scale
-    else:
-        o = torch.matmul(p, v)
+    # FP8 scaling
+    if p_scale is not None:
+        p *= p_scale
+        if DEBUG_CORE:
+            print("p after fp8 scaling:", p, p.shape)
+    o = torch.matmul(p, v)
     if DEBUG_CORE:
         print("o:", o, o.shape)
+    # FP8 descaling
+    if v_inv_scale is not None and p_inv_scale is not None:
+        o *= p_inv_scale * v_inv_scale
+        if DEBUG_CORE:
+            print("o after fp8 descaling:", o, o.shape)
 
     # cast back to original dtype
     o = o.to(torch.float16)
