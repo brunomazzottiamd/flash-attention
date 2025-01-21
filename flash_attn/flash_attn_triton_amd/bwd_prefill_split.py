@@ -80,19 +80,13 @@ def _bwd_dkdv_inner(
     MASK: tl.constexpr,  # causal masking, only apply to tiles on mask diagonal
     ENABLE_DROPOUT: tl.constexpr  # activate dropout
 ):
+    # if HEAD_DIM is padded
+    PADDED_HEAD: tl.constexpr = (ACTUAL_HEAD_DIM != HEAD_DIM)
     offs_m = start_m + tl.arange(0, BLOCK_M)  # start_m + (0, 15)
     offs_n = start_n + tl.arange(0, BLOCK_N)  # start_m + (0, 127)
     offs_k = tl.arange(0, HEAD_DIM)
     # mask to make sure not OOB of seqlen_q
-    mask_m = offs_m < seqlen_q
     mask_n = offs_n < seqlen_k
-    mask_qT = mask_m[None, :]
-    mask_do = mask_m[:, None]
-    PADDED_HEAD: tl.constexpr = (ACTUAL_HEAD_DIM != HEAD_DIM)
-    # if HEAD_DIM is padded
-    if PADDED_HEAD:
-        mask_qT &= offs_k[:, None] < ACTUAL_HEAD_DIM
-        mask_do &= offs_k[None, :] < ACTUAL_HEAD_DIM
     # Q and DO are (seqlen_q, head_dim)
     # qT_ptrs = (1, BLOCK_M) + (HEAD_DIM, 1), transpose of q
     qT_ptrs = Q + offs_m[None, :] * stride_qm + offs_k[:, None] * stride_qk
@@ -106,6 +100,14 @@ def _bwd_dkdv_inner(
     curr_dropout_offset = dropout_offset
     RCP_LN2: tl.constexpr = 1.4426950408889634  # = 1.0 / ln(2)
     for blk_idx in range(num_steps):
+        offs_m = curr_m + tl.arange(0, BLOCK_M)
+        # update the mask because offs_m advanced
+        mask_m = offs_m < seqlen_q
+        mask_qT = mask_m[None, :]
+        mask_do = mask_m[:, None]
+        if PADDED_HEAD:
+            mask_qT &= offs_k[:, None] < ACTUAL_HEAD_DIM
+            mask_do &= offs_k[None, :] < ACTUAL_HEAD_DIM
         qT = tl.load(qT_ptrs, mask=mask_qT, other=0.0)
         # generate dropout mask
         if ENABLE_DROPOUT:
@@ -124,12 +126,8 @@ def _bwd_dkdv_inner(
                 rand_vals = tl.rand(philox_seed, philox_offs)
                 dropout_mask = rand_vals > dropout_p
             dropout_scale = 1 / (1 - dropout_p)
-
         # Load m before computing qk to reduce pipeline stall.
-        offs_m = curr_m + tl.arange(0, BLOCK_M)
-        # update the mask because offs_m advanced
-        mask_m = offs_m < seqlen_q
-        m = tl.load(M + offs_m, mask=offs_m < seqlen_q)
+        m = tl.load(M + offs_m, mask=mask_m, other=0.0)
         qkT = tl.dot(k, qT)
         # TODO: remove the scaling of m later when we removed re-scaling in fwd
         pT = tl.math.exp2(qkT * qk_scale - m[None, :] * RCP_LN2)
@@ -145,7 +143,7 @@ def _bwd_dkdv_inner(
         pT = pT.to(tl.float16)
         dv += tl.dot(pT, do)
         # D (= delta) is pre-divided by ds_scale.
-        Di = tl.load(D + offs_m, mask=offs_m < seqlen_q)
+        Di = tl.load(D + offs_m, mask=mask_m)
         # Compute dP and dS.
         dpT = tl.dot(v, tl.trans(do)).to(tl.float32)
         if ENABLE_DROPOUT:
@@ -160,11 +158,6 @@ def _bwd_dkdv_inner(
         if ENABLE_DROPOUT:
             curr_dropout_offset += step_m * stride_qm
             curr_philox_offset += step_m * stride_qm
-        mask_qT = mask_m[None, :]
-        mask_do = mask_m[:, None]
-        if PADDED_HEAD:
-            mask_qT &= offs_k[:, None] < ACTUAL_HEAD_DIM
-            mask_do &= offs_k[None, :] < ACTUAL_HEAD_DIM
     return dk, dv
 
 
@@ -289,7 +282,7 @@ def _bwd_kernel_dkdv(
         else:
             start_m = 0
 
-        num_steps = (seqlen_q - start_m) // BLOCK_M
+        num_steps = tl.cdiv(seqlen_q - start_m, BLOCK_M)
         # only the blocks on the causal mask diagonal needs to mask
         dk, dv = _bwd_dkdv_inner(
             dk, dv,  # output tensors
@@ -330,18 +323,14 @@ def _bwd_dq_inner(
     MASK: tl.constexpr,
     ENABLE_DROPOUT: tl.constexpr
 ):
+    # if HEAD_DIM is padded
+    PADDED_HEAD: tl.constexpr = (ACTUAL_HEAD_DIM != HEAD_DIM)
     offs_m = start_m + tl.arange(0, BLOCK_M2)
     offs_n = start_n + tl.arange(0, BLOCK_N2)
     offs_k = tl.arange(0, HEAD_DIM)
 
     # mask to make sure not OOB of seqlen_q
     mask_m = offs_m < seqlen_q
-    mask_n = offs_n < seqlen_k
-    mask_kT = mask_n[None, :]
-    PADDED_HEAD: tl.constexpr = (ACTUAL_HEAD_DIM != HEAD_DIM)
-    # if HEAD_DIM is padded
-    if PADDED_HEAD:
-        mask_kT &= offs_k[:, None] < ACTUAL_HEAD_DIM
 
     kT_ptrs = K + offs_n[None, :] * stride_kn + offs_k[:, None] * stride_qk
     vT_ptrs = V + offs_n[None, :] * stride_kn + offs_k[:, None] * stride_qk
@@ -355,6 +344,12 @@ def _bwd_dq_inner(
     curr_dropout_offset = dropout_offset
     RCP_LN2: tl.constexpr = 1.4426950408889634  # = 1.0 / ln(2)
     for blk_idx in range(num_steps):
+        offs_n = curr_n + tl.arange(0, BLOCK_N2)
+        mask_n = offs_n < seqlen_k
+        mask_kT = mask_n[None, :]
+        if PADDED_HEAD:
+            mask_kT &= offs_k[:, None] < ACTUAL_HEAD_DIM
+
         kT = tl.load(kT_ptrs, mask=mask_kT, other=0.0)
         vT = tl.load(vT_ptrs, mask=mask_kT, other=0.0)
 
@@ -378,7 +373,6 @@ def _bwd_dq_inner(
         p = tl.math.exp2(qk * qk_scale - m * RCP_LN2)
         # Autoregressive masking.
         if MASK:
-            offs_n = curr_n + tl.arange(0, BLOCK_N2)
             mask_mn = mask_m[:, None] & (offs_n[None, :] < seqlen_k)
             mask = (offs_m[:, None] >= offs_n[None, :]) & mask_mn
             p = tl.where(mask, p, 0.0)
@@ -524,7 +518,7 @@ def _bwd_kernel_dq(
         )
         end_n -= num_steps * MASK_BLOCK_N
         # stage 2
-        num_steps = end_n // BLOCK_N
+        num_steps = tl.cdiv(end_n, BLOCK_N)
         dq = _bwd_dq_inner(
             dq,  #
             q, K, V, do, m, Delta_ptr, qk_scale, #
