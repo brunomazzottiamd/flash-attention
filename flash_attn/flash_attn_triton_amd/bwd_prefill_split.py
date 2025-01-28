@@ -84,6 +84,7 @@ def _bwd_dkdv_inner(
 ):
     # if HEAD_DIM is padded
     PADDED_HEAD: tl.constexpr = (ACTUAL_HEAD_DIM != HEAD_DIM)
+    delta_qk = seqlen_q - seqlen_k
     offs_m = start_m + tl.arange(0, BLOCK_M)  # start_m + (0, 15)
     offs_n = start_n + tl.arange(0, BLOCK_N)  # start_m + (0, 127)
     offs_k = tl.arange(0, HEAD_DIM)
@@ -142,6 +143,10 @@ def _bwd_dkdv_inner(
         # Autoregressive masking.
         if MASK:
             mask_nm = mask_n[:, None] & (offs_m[None, :] < seqlen_q)
+            # offset offs_m with delta_qk since the causal mask starts at
+            # bottom right of the (seqlen_q, seqlen_k) matrix
+            causal_mask = (offs_m[None, :] - delta_qk) >= offs_n[:, None]
+            mask = causal_mask & mask_nm
             if DEBUG_TRITON_DETAIL:
                 if start_n == 256:
                     print(f"causal_mask: {causal_mask.shape}\n", causal_mask)
@@ -188,8 +193,8 @@ def _bwd_kernel_dkdv(
     cu_seqlens_q, cu_seqlens_k,
     max_seqlen_q, max_seqlen_k,
     dropout_mask, dropout_p, philox_seed, philox_offset_base,
-    BLOCK_M: tl.constexpr,
-    BLOCK_N: tl.constexpr,
+    BLOCK_M: tl.constexpr,  # 32
+    BLOCK_N: tl.constexpr,  # 128
     BLK_SLICE_FACTOR: tl.constexpr,
     HEAD_DIM: tl.constexpr,
     ACTUAL_HEAD_DIM: tl.constexpr,
@@ -225,14 +230,26 @@ def _bwd_kernel_dkdv(
     # and iterate over the M. In this way, we cannot skip N blocks, but only to
     # determine the starting M blocks to skip some initial blocks masked by
     # causal.
+    delta_qk = seqlen_q - seqlen_k
     if DEBUG_TRITON: print(f"\npid: {pid}")
     if DEBUG_TRITON: print(f"delta_qk = {delta_qk}")
+    # q > k: diretcly skip all the way until the start of causal block
+    start_delta_q_gt_k = delta_qk
+    # q < k: some blocks will have no Masked block, other needs to re-calc
+    # starting position
+    # delta_qk is negative so flip it, only multiple of BLOCK_N can skip the
+    # masked op
+    num_blocks_skip = -delta_qk // BLOCK_N
+    delta_aligned = (num_blocks_skip + 1) * BLOCK_N + delta_qk
+    start_delta_q_lt_k = delta_aligned // BLOCK_M * BLOCK_M
+    if delta_qk >= 0:
+        start_delta = delta_qk
+        if DEBUG_TRITON: print(f"q >= k: start_delta = delta_qk aligned to BLOCK_M = {start_delta_q_gt_k}")
+    else:
+        start_delta = start_delta_q_lt_k
+        if DEBUG_TRITON: print(f"q < k: start_delta = residue btw multiple BLOCK_N and delta_qk = {delta_aligned} = aligned to BLOCK_M = {start_delta_q_lt_k}")
+    # align the delta_qk
     start_n = pid * BLOCK_N
-    # seqlen_q > seqlen_k: skip additional blocks at the beginning for every
-    #   N-tile, i.e. add offset to start_m
-    # seqlen_q < seqlen_k: some initial N-tiles will have nothing to skip,
-    #   i.e. subtract offset to start_m and cap to 0. These tiles will not have
-    #   the first _bwd_dkdv_inner() with MASK=True performed.
 
     offs_k = tl.arange(0, HEAD_DIM)
     offs_n = start_n + tl.arange(0, BLOCK_N)
@@ -252,7 +269,19 @@ def _bwd_kernel_dkdv(
     v = tl.load(V + adj_kv + offs_kv, mask=mask_kv, other=0.0)
     # If MQA / GQA, set the K and V head offsets appropriately.
     for hqid in range(hkid * GROUP_SIZE, hkid * GROUP_SIZE + GROUP_SIZE):
-        start_m = start_n + start_delta
+        if delta_qk >= 0:
+            start_m = start_n + start_delta
+            len_m = BLOCK_N
+        else:
+            start_m = max(start_n + delta_qk, 0)
+            start_m = start_m // BLOCK_M * BLOCK_M
+            # because we might shift the masked blocks up, we are deeper into
+            # the masked out region, so we would potentially increase the total
+            # steps with masked operation to get out of it
+            residue_m = max(start_n + delta_qk - start_m, 0)
+            len_m = BLOCK_N + residue_m
+            if DEBUG_TRITON: print(f"residue_m = {residue_m}")
+
         # offset input and output tensor by batch and Q/K heads
         adj_q = bid * stride_qb + hqid * stride_qh + q_start * stride_qm
         Q_ptr = Q + adj_q
@@ -272,7 +301,10 @@ def _bwd_kernel_dkdv(
                              hqid * stride_dropouth
 
         MASK_BLOCK_M: tl.constexpr = BLOCK_M // BLK_SLICE_FACTOR
-        num_steps = BLOCK_N // MASK_BLOCK_M
+        num_steps = tl.cdiv(len_m, MASK_BLOCK_M)
+        # when q < k, we may skip the initial masked op
+        if pid < num_blocks_skip:
+            num_steps = 0
 
         # scaling factor
         RCP_LN2: tl.constexpr = 1.4426950408889634  # = 1.0 / ln(2)
@@ -340,7 +372,7 @@ def _bwd_dq_inner(
     ACTUAL_HEAD_DIM: tl.constexpr,  #
     dropout_p, philox_seed, batch_philox_offset, dropout_offset,  #
     # Filled in by the wrapper.
-    start_m, start_n, num_steps,  #
+    start_m, start_n, end_n, num_steps,  #
     MASK: tl.constexpr,
     ENABLE_DROPOUT: tl.constexpr,
     DEBUG_TRITON: tl.constexpr,
@@ -348,6 +380,7 @@ def _bwd_dq_inner(
 ):
     # if HEAD_DIM is padded
     PADDED_HEAD: tl.constexpr = (ACTUAL_HEAD_DIM != HEAD_DIM)
+    delta_qk = seqlen_q - seqlen_k
     offs_m = start_m + tl.arange(0, BLOCK_M2)
     offs_n = start_n + tl.arange(0, BLOCK_N2)
     offs_k = tl.arange(0, HEAD_DIM)
@@ -369,6 +402,9 @@ def _bwd_dq_inner(
     for blk_idx in range(num_steps):
         if DEBUG_TRITON: print(f"iter {blk_idx}: curr_n = {curr_n}")
         offs_n = curr_n + tl.arange(0, BLOCK_N2)
+        # end_n is needed because the end of causal True might not be perfectly
+        # aligned with the end of the block
+        mask_n = offs_n < end_n
         if DEBUG_TRITON_DETAIL: print(f"start_n = {start_n}, end_n = {end_n}, offs_n: {offs_n.shape}\n{offs_n}")
         if DEBUG_TRITON_DETAIL: print(f"mask_n: {mask_n.shape}\n{mask_n}")
         mask_kT = mask_n[None, :]
@@ -399,8 +435,9 @@ def _bwd_dq_inner(
         p = tl.math.exp2(qk * qk_scale - m * RCP_LN2)
         # Autoregressive masking.
         if MASK:
-            mask_mn = mask_m[:, None] & (offs_n[None, :] < seqlen_k)
-            mask = (offs_m[:, None] >= offs_n[None, :]) & mask_mn
+            mask_mn = mask_m[:, None] & (offs_n[None, :] < end_n)
+            causal_mask = (offs_m[:, None] - delta_qk) >= offs_n[None, :]
+            mask = causal_mask & mask_mn
             p = tl.where(mask, p, 0.0)
         # Compute dP and dS.
         dp = tl.dot(do, vT).to(tl.float32)
@@ -463,7 +500,7 @@ def _bwd_kernel_dq(
         seqlen_q = q_end - q_start
         seqlen_k = k_end - k_start
 
-    # Figure out causal starting block since we have seqlen_q >=< seqlen_k.
+    # Figure out causal starting block since we have seqlen_q <=> seqlen_k.
     # Unlike forward pass where we tile on M dim and iterate on N dim, so that
     # we can skip some M blocks, in backward pass, we tile on the N dim for kv
     # and iterate over the M. In this way, we cannot skip N blocks, but only to
@@ -473,7 +510,10 @@ def _bwd_kernel_dq(
     # can simply skip and we need to adjust starting position.
     start_m = pid * BLOCK_M
     # seqlen_q > seqlen_k, no need to process these tile for dq
+    delta_qk = seqlen_q - seqlen_k
     if DEBUG_TRITON: print(f"end_n = start_m + BLOCK_M = {start_m} + {BLOCK_M} = {start_m + BLOCK_M}")
+    if start_m + BLOCK_M < delta_qk:
+        if DEBUG_TRITON: print(f"start_m + BLOCK_M = {start_m} + {BLOCK_M} = {start_m + BLOCK_M} < delta_qk of {delta_qk}")
         return
 
     offs_k = tl.arange(0, HEAD_DIM)
@@ -491,9 +531,12 @@ def _bwd_kernel_dq(
     # If MQA / GQA, set the K and V head offsets appropriately.
     GROUP_SIZE = HQ // HK
     for hqid in range(hkid * GROUP_SIZE, hkid * GROUP_SIZE + GROUP_SIZE):
-        # seqlen_q < seqlen_k: seqlen_delta more tokens are added at the front
+        # seqlen_q < seqlen_k: delta_qk more kv tokens are added at the front
         #   for every M-tile
-        end_n = start_m + BLOCK_M + seqlen_delta
+        end_n = start_m + BLOCK_M - delta_qk
+        # clamp end_n at [0, seqlen_k]
+        end_n = max(min(end_n, seqlen_k), 0)
+        if DEBUG_TRITON: print(f"delta_qk: {delta_qk}; end_n: {end_n}")
         # offset input and output tensor by batch and Q/K heads
         adj_q = bid * stride_qb + hqid * stride_qh + q_start * stride_qm
         adj_delta = \
@@ -517,7 +560,9 @@ def _bwd_kernel_dq(
         m = m[:, None]
 
         MASK_BLOCK_N: tl.constexpr = BLOCK_N // BLK_SLICE_FACTOR
-        num_steps = BLOCK_M // MASK_BLOCK_N
+        # start can only be 0 at minimum
+        start_n = max(end_n - BLOCK_M, 0)
+        num_steps = tl.cdiv(end_n - start_n, MASK_BLOCK_N)
 
         dq = tl.zeros([BLOCK_M, HEAD_DIM], dtype=tl.float32)
 
@@ -541,15 +586,16 @@ def _bwd_kernel_dq(
             BLOCK_M, MASK_BLOCK_N,  #
             HEAD_DIM, ACTUAL_HEAD_DIM,  #
             dropout_p, philox_seed, batch_philox_offset, dropout_offset,  #
-            start_m, end_n - num_steps * MASK_BLOCK_N, num_steps,  #
+            start_m, start_n, end_n, num_steps,  #
             MASK=True,  #
             ENABLE_DROPOUT=ENABLE_DROPOUT,
             DEBUG_TRITON=DEBUG_TRITON,
             DEBUG_TRITON_DETAIL=DEBUG_TRITON_DETAIL,
         )
         end_n -= num_steps * MASK_BLOCK_N
-        # stage 2
         num_steps = tl.cdiv(end_n, BLOCK_N)
+        start_n = max(end_n - num_steps * BLOCK_N, 0)
+        if DEBUG_TRITON: print(f"unMasked: start_m: {start_m}, start_n: {start_n}, end_n: {end_n}, num_steps: {num_steps}")
         dq = _bwd_dq_inner(
             dq,  #
             q, K, V, do, m, Delta_ptr, qk_scale, #
@@ -559,7 +605,7 @@ def _bwd_kernel_dq(
             BLOCK_M, BLOCK_N,  #
             HEAD_DIM, ACTUAL_HEAD_DIM,  #
             dropout_p, philox_seed, batch_philox_offset, dropout_offset,  #
-            start_m, end_n - num_steps * BLOCK_N, num_steps,  #
+            start_m, start_n, end_n, num_steps,  #
             MASK=False,  #
             ENABLE_DROPOUT=ENABLE_DROPOUT,
             DEBUG_TRITON=DEBUG_TRITON,
