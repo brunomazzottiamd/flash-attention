@@ -78,7 +78,9 @@ def _bwd_dkdv_inner(
     # Filled in by the wrapper.
     start_n, start_m, num_steps,  # iteration numbers
     MASK: tl.constexpr,  # causal masking, only apply to tiles on mask diagonal
-    ENABLE_DROPOUT: tl.constexpr  # activate dropout
+    ENABLE_DROPOUT: tl.constexpr,  # activate dropout
+    DEBUG_TRITON: tl.constexpr,
+    DEBUG_TRITON_DETAIL: tl.constexpr,
 ):
     # if HEAD_DIM is padded
     PADDED_HEAD: tl.constexpr = (ACTUAL_HEAD_DIM != HEAD_DIM)
@@ -100,6 +102,7 @@ def _bwd_dkdv_inner(
     curr_dropout_offset = dropout_offset
     RCP_LN2: tl.constexpr = 1.4426950408889634  # = 1.0 / ln(2)
     for blk_idx in range(num_steps):
+        if DEBUG_TRITON: print(f"iter {blk_idx}: curr_m = {curr_m}")
         offs_m = curr_m + tl.arange(0, BLOCK_M)
         # update the mask because offs_m advanced
         mask_m = offs_m < seqlen_q
@@ -129,18 +132,29 @@ def _bwd_dkdv_inner(
         # Load m before computing qk to reduce pipeline stall.
         m = tl.load(M + offs_m, mask=mask_m, other=0.0)
         qkT = tl.dot(k, qT)
+        if DEBUG_TRITON_DETAIL:
+            if start_n == 256:
+                print(f"qT: {qT.shape}\n", qT)
+                print(f"k: {k.shape}\n", k)
+                print(f"qkT scaled: {qkT.shape}\n", qkT * qk_scale / RCP_LN2)
         # TODO: remove the scaling of m later when we removed re-scaling in fwd
         pT = tl.math.exp2(qkT * qk_scale - m[None, :] * RCP_LN2)
         # Autoregressive masking.
         if MASK:
             mask_nm = mask_n[:, None] & (offs_m[None, :] < seqlen_q)
-            mask = (offs_m[None, :] >= offs_n[:, None]) & mask_nm
+            if DEBUG_TRITON_DETAIL:
+                if start_n == 256:
+                    print(f"causal_mask: {causal_mask.shape}\n", causal_mask)
+                    print(f"qkT after causal: {qkT.shape}\n", tl.where(causal_mask, qkT * qk_scale / RCP_LN2, 0.0))
             pT = tl.where(mask, pT, 0.0)
         do = tl.load(do_ptrs, mask=mask_do, other=0.0)
         # Compute dV.
         if ENABLE_DROPOUT:
             pT = tl.where(dropout_mask, pT, 0.0) * dropout_scale
         pT = pT.to(tl.float16)
+        if DEBUG_TRITON_DETAIL:
+            if start_n == 256:
+                print(f"pT: {pT.shape}\n", pT)
         dv += tl.dot(pT, do)
         # D (= delta) is pre-divided by ds_scale.
         Di = tl.load(D + offs_m, mask=mask_m)
@@ -182,6 +196,8 @@ def _bwd_kernel_dkdv(
     CAUSAL: tl.constexpr,
     ENABLE_DROPOUT: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    DEBUG_TRITON: tl.constexpr,
+    DEBUG_TRITON_DETAIL: tl.constexpr,
 ):
     # program ids
     pid = tl.program_id(0)
@@ -209,8 +225,8 @@ def _bwd_kernel_dkdv(
     # and iterate over the M. In this way, we cannot skip N blocks, but only to
     # determine the starting M blocks to skip some initial blocks masked by
     # causal.
-    seqlen_delta = seqlen_q - seqlen_k
-    start_delta = (seqlen_delta // BLOCK_M) * BLOCK_M
+    if DEBUG_TRITON: print(f"\npid: {pid}")
+    if DEBUG_TRITON: print(f"delta_qk = {delta_qk}")
     start_n = pid * BLOCK_N
     # seqlen_q > seqlen_k: skip additional blocks at the beginning for every
     #   N-tile, i.e. add offset to start_m
@@ -264,26 +280,29 @@ def _bwd_kernel_dkdv(
 
         # if start_m is negative, the current N-tile has no block on the
         #   diagonal of causal mask, so everything have no causal mask
-        if start_m >= 0:
-            dk, dv = _bwd_dkdv_inner(
-                dk, dv,  # output tensors
-                Q_ptr, k, v, DO_ptr, M_ptr, Delta_ptr, qk_scale, # input tensors
-                stride_qm, stride_qk,  # strides for q
-                stride_dropoutm, stride_dropoutn,  # strides for dropout
-                MASK_BLOCK_M, BLOCK_N,  # block dim
-                HEAD_DIM, ACTUAL_HEAD_DIM,  # head dim
-                dropout_p, philox_seed, batch_philox_offset, dropout_offset,  #
-                seqlen_q, seqlen_k,  # max sequence length for q and k
-                start_n, start_m, num_steps,  # iteration numbers
-                MASK=True,  # causal masking
-                ENABLE_DROPOUT=ENABLE_DROPOUT,  # activate dropout
-            )
-            start_m += num_steps * MASK_BLOCK_M
-        else:
-            start_m = 0
-
+        if DEBUG_TRITON: print(f"Masked: start_n: {start_n}; start_m: {start_m}, num_steps: {num_steps}")
+        dk, dv = _bwd_dkdv_inner(
+            dk, dv,  # output tensors
+            Q_ptr, k, v, DO_ptr, M_ptr, Delta_ptr, qk_scale, # input tensors
+            stride_qm, stride_qk,  # strides for q
+            stride_dropoutm, stride_dropoutn,  # strides for dropout
+            MASK_BLOCK_M, BLOCK_N,  # block dim
+            HEAD_DIM, ACTUAL_HEAD_DIM,  # head dim
+            dropout_p, philox_seed, batch_philox_offset, dropout_offset,  #
+            seqlen_q, seqlen_k,  # max sequence length for q and k
+            start_n, start_m, num_steps,  # iteration numbers
+            MASK=True,  # causal masking
+            ENABLE_DROPOUT=ENABLE_DROPOUT,  # activate dropout
+            DEBUG_TRITON=DEBUG_TRITON,
+            DEBUG_TRITON_DETAIL=DEBUG_TRITON_DETAIL,
+        )
+        start_m += num_steps * MASK_BLOCK_M
         num_steps = tl.cdiv(seqlen_q - start_m, BLOCK_M)
-        # only the blocks on the causal mask diagonal needs to mask
+        end_m = start_m + num_steps * BLOCK_M
+
+        if DEBUG_TRITON: print(f"start_m after Masked step: {start_m}; num_steps: {num_steps}")
+        if DEBUG_TRITON: print(f"unMasked: start_n: {start_n}, start_m: {start_m}, end_m: {end_m}, num_steps: {num_steps}")
+        if DEBUG_TRITON: print("unMasked")
         dk, dv = _bwd_dkdv_inner(
             dk, dv,  # output tensors
             Q_ptr, k, v, DO_ptr, M_ptr, Delta_ptr, qk_scale, # input tensors
@@ -296,6 +315,8 @@ def _bwd_kernel_dkdv(
             start_n, start_m, num_steps,  # iteration numbers
             MASK=False,  # causal masking
             ENABLE_DROPOUT=ENABLE_DROPOUT,  # activate dropout
+            DEBUG_TRITON=DEBUG_TRITON,
+            DEBUG_TRITON_DETAIL=DEBUG_TRITON_DETAIL,
         )
 
     # Write back dV and dK.
@@ -321,7 +342,9 @@ def _bwd_dq_inner(
     # Filled in by the wrapper.
     start_m, start_n, num_steps,  #
     MASK: tl.constexpr,
-    ENABLE_DROPOUT: tl.constexpr
+    ENABLE_DROPOUT: tl.constexpr,
+    DEBUG_TRITON: tl.constexpr,
+    DEBUG_TRITON_DETAIL: tl.constexpr,
 ):
     # if HEAD_DIM is padded
     PADDED_HEAD: tl.constexpr = (ACTUAL_HEAD_DIM != HEAD_DIM)
@@ -344,8 +367,10 @@ def _bwd_dq_inner(
     curr_dropout_offset = dropout_offset
     RCP_LN2: tl.constexpr = 1.4426950408889634  # = 1.0 / ln(2)
     for blk_idx in range(num_steps):
+        if DEBUG_TRITON: print(f"iter {blk_idx}: curr_n = {curr_n}")
         offs_n = curr_n + tl.arange(0, BLOCK_N2)
-        mask_n = offs_n < seqlen_k
+        if DEBUG_TRITON_DETAIL: print(f"start_n = {start_n}, end_n = {end_n}, offs_n: {offs_n.shape}\n{offs_n}")
+        if DEBUG_TRITON_DETAIL: print(f"mask_n: {mask_n.shape}\n{mask_n}")
         mask_kT = mask_n[None, :]
         if PADDED_HEAD:
             mask_kT &= offs_k[:, None] < ACTUAL_HEAD_DIM
@@ -370,6 +395,7 @@ def _bwd_dq_inner(
             dropout_scale = 1 / (1 - dropout_p)
 
         qk = tl.dot(q, kT)
+        if DEBUG_TRITON_DETAIL: print(f"qk scaled: {qk.shape}\n", qk * qk_scale / RCP_LN2)
         p = tl.math.exp2(qk * qk_scale - m * RCP_LN2)
         # Autoregressive masking.
         if MASK:
@@ -416,6 +442,8 @@ def _bwd_kernel_dq(
     CAUSAL: tl.constexpr,
     ENABLE_DROPOUT: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    DEBUG_TRITON: tl.constexpr,
+    DEBUG_TRITON_DETAIL: tl.constexpr,
 ):
     # program ids
     pid = tl.program_id(0)
@@ -445,8 +473,7 @@ def _bwd_kernel_dq(
     # can simply skip and we need to adjust starting position.
     start_m = pid * BLOCK_M
     # seqlen_q > seqlen_k, no need to process these tile for dq
-    seqlen_delta = seqlen_q - seqlen_k
-    if start_m + BLOCK_M < seqlen_delta:
+    if DEBUG_TRITON: print(f"end_n = start_m + BLOCK_M = {start_m} + {BLOCK_M} = {start_m + BLOCK_M}")
         return
 
     offs_k = tl.arange(0, HEAD_DIM)
@@ -498,11 +525,13 @@ def _bwd_kernel_dq(
         RCP_LN2: tl.constexpr = 1.4426950408889634  # = 1.0 / ln(2)
         qk_scale = sm_scale * RCP_LN2
 
+        if DEBUG_TRITON: print(f"pid: {pid}; end_n: {end_n}, start_m: {start_m}")
         # Compute dQ for masked (diagonal) blocks.
         # NOTE: This code scans each row of QK^T backward (from right to left,
         # but inside each call to _bwd_dq_inner, from left to right), but that's
         # not due to anything important.  I just wanted to reuse the loop
         # structure for dK & dV above as much as possible.
+        if DEBUG_TRITON: print(f"Masked: start_m: {start_m}, start_n: {start_n}, end_n: {end_n}, num_steps: {num_steps}")
         dq = _bwd_dq_inner(
             dq,
             q, K, V, do, m, Delta_ptr, qk_scale, #
@@ -515,6 +544,8 @@ def _bwd_kernel_dq(
             start_m, end_n - num_steps * MASK_BLOCK_N, num_steps,  #
             MASK=True,  #
             ENABLE_DROPOUT=ENABLE_DROPOUT,
+            DEBUG_TRITON=DEBUG_TRITON,
+            DEBUG_TRITON_DETAIL=DEBUG_TRITON_DETAIL,
         )
         end_n -= num_steps * MASK_BLOCK_N
         # stage 2
@@ -531,6 +562,8 @@ def _bwd_kernel_dq(
             start_m, end_n - num_steps * BLOCK_N, num_steps,  #
             MASK=False,  #
             ENABLE_DROPOUT=ENABLE_DROPOUT,
+            DEBUG_TRITON=DEBUG_TRITON,
+            DEBUG_TRITON_DETAIL=DEBUG_TRITON_DETAIL,
         )
         # Write back dQ.
         offs_dq = offs_m[:, None] * stride_qm + offs_k[None, :] * stride_qk
@@ -560,6 +593,8 @@ def attention_prefill_backward_triton_split_impl(
     philox_seed,
     philox_offset,
     use_exp2: bool,
+    DEBUG_TRITON: bool,
+    DEBUG_TRITON_DETAIL: bool,
 ):
     # make contigious
     # TODO: why making this continguous????
@@ -644,6 +679,7 @@ def attention_prefill_backward_triton_split_impl(
         )
 
     grid = ((max_seqlen_k + BLOCK_N1 - 1) // BLOCK_N1, batch, nheads_k)
+    if DEBUG_TRITON: print(f"_bwd_kernel_dkdv: grid = {grid}, block_size = ({BLOCK_M1, BLOCK_N1})", )
     _bwd_kernel_dkdv[grid](
         q, k, v, sm_scale, o, do, dk, dv,
         softmax_lse, delta,
@@ -663,9 +699,12 @@ def attention_prefill_backward_triton_split_impl(
         num_warps=NUM_WARPS,
         num_stages=NUM_STAGES,
         waves_per_eu = WAVES_PER_EU,
+        DEBUG_TRITON=DEBUG_TRITON,
+        DEBUG_TRITON_DETAIL=DEBUG_TRITON_DETAIL,
     )
 
     grid = ((max_seqlen_q + BLOCK_M2 - 1) // BLOCK_M2, batch, nheads_k)
+    if DEBUG_TRITON: print(f"\n_bwd_kernel_dq: grid = {grid}, block_size = ({BLOCK_M2, BLOCK_N2})", )
     _bwd_kernel_dq[grid](
         q, k, v, sm_scale, o, do, dq,
         softmax_lse, delta,
@@ -685,6 +724,8 @@ def attention_prefill_backward_triton_split_impl(
         num_warps=NUM_WARPS,
         num_stages=NUM_STAGES,
         waves_per_eu = WAVES_PER_EU,
+        DEBUG_TRITON=DEBUG_TRITON and False,
+        DEBUG_TRITON_DETAIL=DEBUG_TRITON_DETAIL and False,
     )
 
     return dq, dk, dv, delta, None, None

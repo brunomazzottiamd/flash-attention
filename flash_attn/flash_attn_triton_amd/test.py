@@ -1,7 +1,7 @@
 import torch
 import pytest
 
-from .utils import DEBUG, MetaData, get_input_shapes, input_helper, varlen_input_helper, compute_alibi_tensor_ref, get_arch, arch_supports_fp8
+from .utils import DEBUG, DEBUG_TRITON, DEBUG_TRITON_DETAIL, MetaData, get_input_shapes, input_helper, varlen_input_helper, compute_alibi_tensor_ref, get_arch, arch_supports_fp8
 from .interface_torch import attention_prefill, attention_decode
 from .fwd_ref import attention_forward_pytorch_ref_impl
 from .fwd_prefill import attention_prefill_forward_triton_impl
@@ -1216,6 +1216,8 @@ def test_op_prefill_bwd_split_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, 
         metadata.philox_seed,
         metadata.philox_offset,
         use_exp2,
+        DEBUG_TRITON=DEBUG_TRITON,
+        DEBUG_TRITON_DETAIL=DEBUG_TRITON_DETAIL,
     )
 
     # =============================================== Check ==============================================================
@@ -1229,24 +1231,28 @@ def test_op_prefill_bwd_split_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, 
                                )
 
     if DEBUG:
-        print("dv_triton:", dv_triton, dv_triton.shape)
-        print("dv_ref:", dv_ref, dv_ref.shape)
-    torch.testing.assert_close(dv_triton, dv_ref, atol=ATOL, rtol=RTOL,
-                               equal_nan=EQUAL_NAN,
-                               )
-    print(torch.where(dv_triton == dv_ref))
+        dim_names = ["batch", "qhead", "seqlen_kv", "head_dim"]
+        mismatch = torch.where(torch.isclose(dv_triton, dv_ref, atol=ATOL, rtol=RTOL, equal_nan=EQUAL_NAN) != 1)
+        num_error_dv = mismatch[0].numel()
+        if num_error_dv > 0:
+            print(f"\nnumber of mismatch in dv: {num_error_dv}")
+            for m, name in zip(mismatch, dim_names):
+                print(f"{name}: {m.unique().cpu()}")
+        dim_names = ["batch", "kvhead", "seqlen_kv", "head_dim"]
+        mismatch = torch.where(torch.isclose(dk_triton, dk_ref, atol=ATOL, rtol=RTOL, equal_nan=EQUAL_NAN) != 1)
+        num_error_dk = mismatch[0].numel()
+        if num_error_dk > 0:
+            print(f"\nnumber of mismatch in dk: {num_error_dk}")
+            for m, name in zip(mismatch, dim_names):
+                print(f"{name}: {m.unique().cpu()}")
+        dim_names = ["batch", "qhead", "seqlen_q", "head_dim"]
+        mismatch = torch.where(torch.isclose(dq_triton, dq_ref, atol=ATOL, rtol=RTOL, equal_nan=EQUAL_NAN) != 1)
+        num_error_dq = mismatch[0].numel()
+        if num_error_dq > 0:
+            print(f"\nnumber of mismatch in dq: {num_error_dq}")
+            for m, name in zip(mismatch, dim_names):
+                print(f"{name}: {m.unique().cpu()}")
 
-    if DEBUG:
-        print("dk_triton:", dk_triton, dk_triton.shape)
-        print("dk_ref:", dk_ref, dk_ref.shape)
-    torch.testing.assert_close(dk_triton, dk_ref, atol=ATOL, rtol=RTOL,
-                               equal_nan=EQUAL_NAN,
-                               )
-
-    if DEBUG:
-        print("dq_triton:", dq_triton, dq_triton.shape)
-        print("dq_ref:", dq_ref, dq_ref.shape)
-    torch.testing.assert_close(dq_triton, dq_ref, atol=ATOL, rtol=RTOL,
-                               equal_nan=EQUAL_NAN,
-                            #    msg="dq not close",
-                               )
+    torch.testing.assert_close(dv_triton, dv_ref, atol=ATOL, rtol=RTOL, equal_nan=EQUAL_NAN)
+    torch.testing.assert_close(dk_triton, dk_ref, atol=ATOL, rtol=RTOL, equal_nan=EQUAL_NAN)
+    torch.testing.assert_close(dq_triton, dq_ref, atol=ATOL, rtol=RTOL, equal_nan=EQUAL_NAN)
