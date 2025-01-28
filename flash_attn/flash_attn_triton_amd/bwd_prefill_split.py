@@ -37,6 +37,10 @@ def _bwd_preprocess(
         q_start = tl.load(cu_seqlens_q + bid)
         q_end = tl.load(cu_seqlens_q + bid + 1)
         seqlen_q = q_end - q_start
+    else:
+        q_start = 0
+        seqlen_q = max_seqlen_q
+
     # Compute offsets
     offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
     offs_k = tl.arange(0, HEAD_DIM)
@@ -58,8 +62,8 @@ def _bwd_preprocess(
     do = tl.load(do_ptrs, mask=mask_md, other=0.0).to(tl.float32)
     # compute and write-back to delta
     delta = tl.sum(o * do, axis=1)
-    delta_offset = Delta + bid * stride_deltab + hid * stride_deltah + q_start
-    tl.store(delta_offset + offs_m, delta, mask=mask_m)
+    delta_offset = Delta + bid * stride_deltab + hid * stride_deltah + q_start * stride_deltam
+    tl.store(delta_offset + offs_m * stride_deltam, delta, mask=mask_m)
 
 
 # The main inner-loop logic for computing dK and dV.
@@ -69,6 +73,7 @@ def _bwd_dkdv_inner(
     Q, k, v, DO, M, D, qk_scale,  # input tensor
     stride_qm, stride_qk,  # shared by Q/DO.
     stride_dropoutm, stride_dropoutn,  #
+    stride_deltam,
     BLOCK_M: tl.constexpr,  # 16
     BLOCK_N: tl.constexpr,  # 128
     HEAD_DIM: tl.constexpr,  #
@@ -131,7 +136,7 @@ def _bwd_dkdv_inner(
                 dropout_mask = rand_vals > dropout_p
             dropout_scale = 1 / (1 - dropout_p)
         # Load m before computing qk to reduce pipeline stall.
-        m = tl.load(M + offs_m, mask=mask_m, other=0.0)
+        m = tl.load(M + offs_m * stride_deltam, mask=mask_m, other=0.0)
         qkT = tl.dot(k, qT)
         if DEBUG_TRITON_DETAIL:
             if start_n == 256:
@@ -162,7 +167,7 @@ def _bwd_dkdv_inner(
                 print(f"pT: {pT.shape}\n", pT)
         dv += tl.dot(pT, do)
         # D (= delta) is pre-divided by ds_scale.
-        Di = tl.load(D + offs_m, mask=mask_m)
+        Di = tl.load(D + offs_m * stride_deltam, mask=mask_m)
         # Compute dP and dS.
         dpT = tl.dot(v, tl.trans(do)).to(tl.float32)
         if ENABLE_DROPOUT:
@@ -286,7 +291,7 @@ def _bwd_kernel_dkdv(
         adj_q = bid * stride_qb + hqid * stride_qh + q_start * stride_qm
         Q_ptr = Q + adj_q
         DO_ptr = DO + adj_q
-        adj_delta = bid * stride_deltab + hqid * stride_deltah + q_start
+        adj_delta = bid * stride_deltab + hqid * stride_deltah + q_start * stride_deltam
         M_ptr = M + adj_delta
         Delta_ptr = Delta + adj_delta
 
@@ -318,6 +323,7 @@ def _bwd_kernel_dkdv(
             Q_ptr, k, v, DO_ptr, M_ptr, Delta_ptr, qk_scale, # input tensors
             stride_qm, stride_qk,  # strides for q
             stride_dropoutm, stride_dropoutn,  # strides for dropout
+            stride_deltam,
             MASK_BLOCK_M, BLOCK_N,  # block dim
             HEAD_DIM, ACTUAL_HEAD_DIM,  # head dim
             dropout_p, philox_seed, batch_philox_offset, dropout_offset,  #
@@ -340,6 +346,7 @@ def _bwd_kernel_dkdv(
             Q_ptr, k, v, DO_ptr, M_ptr, Delta_ptr, qk_scale, # input tensors
             stride_qm, stride_qk,  # strides for q
             stride_dropoutm, stride_dropoutn,  # strides for dropout
+            stride_deltam,
             BLOCK_M, BLOCK_N,  # block dim
             HEAD_DIM, ACTUAL_HEAD_DIM,  # head dim
             dropout_p, philox_seed, batch_philox_offset, dropout_offset,  #
@@ -365,6 +372,7 @@ def _bwd_dq_inner(
     # shared by Q/K/V/DO.
     stride_qm, stride_qk, stride_kn,
     stride_dropoutm, stride_dropoutn,  # stride for dropout
+    stride_deltam,
     seqlen_q, seqlen_k,  #
     BLOCK_M2: tl.constexpr,  #
     BLOCK_N2: tl.constexpr,  #
@@ -391,7 +399,7 @@ def _bwd_dq_inner(
     kT_ptrs = K + offs_n[None, :] * stride_kn + offs_k[:, None] * stride_qk
     vT_ptrs = V + offs_n[None, :] * stride_kn + offs_k[:, None] * stride_qk
     # D (= delta) is pre-divided by ds_scale.
-    Di = tl.load(Delta + offs_m, mask=mask_m, other=0.0)
+    Di = tl.load(Delta + offs_m * stride_deltam, mask=mask_m, other=0.0)
     # BLOCK_M2 must be a multiple of BLOCK_N2, otherwise the code wouldn't work.
     tl.static_assert(BLOCK_M2 % BLOCK_N2 == 0)
     curr_n = start_n
@@ -556,7 +564,7 @@ def _bwd_kernel_dq(
 
         q = tl.load(Q + adj_q + offs_q, mask=mask_q, other=0.0)
         do = tl.load(DO + adj_q + offs_q, mask=mask_q, other=0.0)
-        m = tl.load(M + adj_delta + offs_m, mask=offs_m < seqlen_q)
+        m = tl.load(M + adj_delta + offs_m * stride_deltam, mask=offs_m < seqlen_q)
         m = m[:, None]
 
         MASK_BLOCK_N: tl.constexpr = BLOCK_N // BLK_SLICE_FACTOR
@@ -582,6 +590,7 @@ def _bwd_kernel_dq(
             q, K, V, do, m, Delta_ptr, qk_scale, #
             stride_qm, stride_qk, stride_kn,
             stride_dropoutm, stride_dropoutn,  #
+            stride_deltam,
             seqlen_q, seqlen_k,  #
             BLOCK_M, MASK_BLOCK_N,  #
             HEAD_DIM, ACTUAL_HEAD_DIM,  #
@@ -601,6 +610,7 @@ def _bwd_kernel_dq(
             q, K, V, do, m, Delta_ptr, qk_scale, #
             stride_qm, stride_qk, stride_kn,  #
             stride_dropoutm, stride_dropoutn,  #
+            stride_deltam,
             seqlen_q, seqlen_k,  #
             BLOCK_M, BLOCK_N,  #
             HEAD_DIM, ACTUAL_HEAD_DIM,  #
