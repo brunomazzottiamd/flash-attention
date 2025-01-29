@@ -414,7 +414,7 @@ def _bwd_dq_inner(
     curr_dropout_offset = dropout_offset
     RCP_LN2: tl.constexpr = 1.4426950408889634  # = 1.0 / ln(2)
     for blk_idx in range(num_steps):
-        if DEBUG_TRITON: print(f"iter {blk_idx}: curr_n = {curr_n}")
+        if DEBUG_TRITON: print(f"iter {blk_idx}: curr_n = {curr_n}")  # noqa: E701
         offs_n = curr_n + tl.arange(0, BLOCK_N2)
         # end_n is needed because the end of causal True might not be perfectly
         # aligned with the end of the block
@@ -526,9 +526,9 @@ def _bwd_kernel_dq(
     start_m = pid * BLOCK_M
     # seqlen_q > seqlen_k, no need to process these tile for dq
     delta_qk = seqlen_q - seqlen_k
-    if DEBUG_TRITON: print(f"end_n = start_m + BLOCK_M = {start_m} + {BLOCK_M} = {start_m + BLOCK_M}")
+    if DEBUG_TRITON: print(f"end_n = start_m + BLOCK_M = {start_m} + {BLOCK_M} = {start_m + BLOCK_M}")  # noqa: E701
     if start_m + BLOCK_M < delta_qk:
-        if DEBUG_TRITON: print(f"start_m + BLOCK_M = {start_m} + {BLOCK_M} = {start_m + BLOCK_M} < delta_qk of {delta_qk}")
+        if DEBUG_TRITON: print(f"start_m + BLOCK_M = {start_m} + {BLOCK_M} = {start_m + BLOCK_M} < delta_qk of {delta_qk}")  # noqa: E701
         return
 
     offs_k = tl.arange(0, HEAD_DIM)
@@ -551,7 +551,7 @@ def _bwd_kernel_dq(
         end_n = start_m + BLOCK_M - delta_qk
         # clamp end_n at [0, seqlen_k]
         end_n = max(min(end_n, seqlen_k), 0)
-        if DEBUG_TRITON: print(f"delta_qk: {delta_qk}; end_n: {end_n}")
+        if DEBUG_TRITON: print(f"delta_qk: {delta_qk}; end_n: {end_n}")  # noqa: E701
         # offset input and output tensor by batch and Q/K heads
         adj_q = bid * stride_qb + hqid * stride_qh + q_start * stride_qm
         adj_delta = \
@@ -571,7 +571,8 @@ def _bwd_kernel_dq(
 
         q = tl.load(Q + adj_q + offs_q, mask=mask_q, other=0.0)
         do = tl.load(DO + adj_q + offs_q, mask=mask_q, other=0.0)
-        m = tl.load(M + adj_delta + offs_m * stride_deltam, mask=offs_m < seqlen_q)
+        m = tl.load(M + adj_delta + offs_m * stride_deltam,
+                    mask=offs_m < seqlen_q)
         m = m[:, None]
 
         MASK_BLOCK_N: tl.constexpr = BLOCK_N // BLK_SLICE_FACTOR
@@ -580,17 +581,13 @@ def _bwd_kernel_dq(
         num_steps = tl.cdiv(end_n - start_n, MASK_BLOCK_N)
 
         dq = tl.zeros([BLOCK_M, HEAD_DIM], dtype=tl.float32)
-
-        # scaling factor
-        RCP_LN2: tl.constexpr = 1.4426950408889634  # = 1.0 / ln(2)
-
-        if DEBUG_TRITON: print(f"pid: {pid}; end_n: {end_n}, start_m: {start_m}")
+        if DEBUG_TRITON: print(f"pid: {pid}; end_n: {end_n}, start_m: {start_m}")  # noqa: E701
         # Compute dQ for masked (diagonal) blocks.
         # NOTE: This code scans each row of QK^T backward (from right to left,
         # but inside each call to _bwd_dq_inner, from left to right), but that's
         # not due to anything important.  I just wanted to reuse the loop
         # structure for dK & dV above as much as possible.
-        if DEBUG_TRITON: print(f"Masked: start_m: {start_m}, start_n: {start_n}, end_n: {end_n}, num_steps: {num_steps}")
+        if DEBUG_TRITON: print(f"Masked: start_m: {start_m}, start_n: {start_n}, end_n: {end_n}, num_steps: {num_steps}")  # noqa: E701
         dq = _bwd_dq_inner(
             dq,
             q, K, V, do, m, Delta_ptr, sm_scale, #
@@ -611,7 +608,7 @@ def _bwd_kernel_dq(
         end_n -= num_steps * MASK_BLOCK_N
         num_steps = tl.cdiv(end_n, BLOCK_N)
         start_n = max(end_n - num_steps * BLOCK_N, 0)
-        if DEBUG_TRITON: print(f"unMasked: start_m: {start_m}, start_n: {start_n}, end_n: {end_n}, num_steps: {num_steps}")
+        if DEBUG_TRITON: print(f"unMasked: start_m: {start_m}, start_n: {start_n}, end_n: {end_n}, num_steps: {num_steps}")  # noqa: E701
         dq = _bwd_dq_inner(
             dq,  #
             q, K, V, do, m, Delta_ptr, sm_scale, #
@@ -821,7 +818,8 @@ def _bwd_kernel_dq_noncausal(
 
         q = tl.load(Q + adj_q + offs_q, mask=mask_q, other=0.0)
         do = tl.load(DO + adj_q + offs_q, mask=mask_q, other=0.0)
-        m = tl.load(M + adj_delta + offs_m * stride_deltam, mask=offs_m < seqlen_q)
+        m = tl.load(M + adj_delta + offs_m * stride_deltam,
+                    mask=offs_m < seqlen_q)
         m = m[:, None]
 
         # start can only be 0 at minimum
@@ -968,7 +966,7 @@ def attention_prefill_backward_triton_split_impl(
     grid_dkdv = ((max_seqlen_k + BLOCK_N1 - 1) // BLOCK_N1, batch, nheads_k)
     grid_dq = ((max_seqlen_q + BLOCK_M2 - 1) // BLOCK_M2, batch, nheads_k)
     if causal:
-        if DEBUG_TRITON: print(f"_bwd_kernel_dkdv: grid = {grid_dkdv}, block_size = ({BLOCK_M1, BLOCK_N1})", )
+        if DEBUG_TRITON: print(f"_bwd_kernel_dkdv: grid = {grid_dkdv}, block_size = ({BLOCK_M1, BLOCK_N1})", )  # noqa: E701
         _bwd_kernel_dkdv[grid_dkdv](
             q, k, v, sm_scale, o, do, dk, dv,
             softmax_lse, delta,
@@ -992,7 +990,7 @@ def attention_prefill_backward_triton_split_impl(
             DEBUG_TRITON_DETAIL=DEBUG_TRITON_DETAIL,
         )
 
-        if DEBUG_TRITON: print(f"\n_bwd_kernel_dq: grid = {grid_dq}, block_size = ({BLOCK_M2, BLOCK_N2})", )
+        if DEBUG_TRITON: print(f"\n_bwd_kernel_dq: grid = {grid_dq}, block_size = ({BLOCK_M2, BLOCK_N2})", )  # noqa: E701
         _bwd_kernel_dq[grid_dq](
             q, k, v, sm_scale, o, do, dq,
             softmax_lse, delta,
