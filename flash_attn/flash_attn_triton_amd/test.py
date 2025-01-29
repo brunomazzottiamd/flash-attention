@@ -1122,9 +1122,9 @@ def test_op_prefill_varlen_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, drop
 # direct comparison among tutorial, Michael's implementation bwd and this one
 
 ])
-@pytest.mark.parametrize('causal', [True])
+@pytest.mark.parametrize('causal', [True, False])
 @pytest.mark.parametrize('dropout_p', [0.0, 0.2])
-@pytest.mark.parametrize('use_exp2', [True]) # FIXME: using exp2 causes issue when used with causal
+@pytest.mark.parametrize('use_exp2', [True, False]) # FIXME: using exp2 causes issue when used with causal
 # @pytest.mark.parametrize('layout', ["bhsd"])
 @pytest.mark.parametrize('layout', ["bhsd", "thd"])
 @pytest.mark.parametrize('sequence_parallel', [True])
