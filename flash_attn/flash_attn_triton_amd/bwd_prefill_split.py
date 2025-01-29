@@ -84,6 +84,7 @@ def _bwd_dkdv_inner(
     start_n, start_m, num_steps,  # iteration numbers
     MASK: tl.constexpr,  # causal masking, only apply to tiles on mask diagonal
     ENABLE_DROPOUT: tl.constexpr,  # activate dropout
+    USE_EXP2: tl.constexpr,  # activate dropout
     DEBUG_TRITON: tl.constexpr,
     DEBUG_TRITON_DETAIL: tl.constexpr,
 ):
@@ -143,9 +144,13 @@ def _bwd_dkdv_inner(
             if start_n == 256:
                 print(f"qT: {qT.shape}\n", qT)
                 print(f"k: {k.shape}\n", k)
-                print(f"qkT scaled: {qkT.shape}\n", qkT * qk_scale / RCP_LN2)
+                print(f"qkT scaled: {qkT.shape}\n", qkT * sm_scale)
         # TODO: remove the scaling of m later when we removed re-scaling in fwd
-        pT = tl.math.exp2(qkT * qk_scale - m[None, :] * RCP_LN2)
+        if USE_EXP2:
+            pT = tl.math.exp2(qkT * sm_scale * RCP_LN2 - m[None, :] * RCP_LN2)
+        else:
+            pT = tl.math.exp(qkT * sm_scale - m[None, :])
+
         # Autoregressive masking.
         if MASK:
             # offset offs_m with delta_qk since the causal mask starts at
@@ -207,6 +212,7 @@ def _bwd_kernel_dkdv(
     CAUSAL: tl.constexpr,
     ENABLE_DROPOUT: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    USE_EXP2: tl.constexpr,
     DEBUG_TRITON: tl.constexpr,
     DEBUG_TRITON_DETAIL: tl.constexpr,
 ):
@@ -314,16 +320,12 @@ def _bwd_kernel_dkdv(
         if pid < num_blocks_skip:
             num_steps = 0
 
-        # scaling factor
-        RCP_LN2: tl.constexpr = 1.4426950408889634  # = 1.0 / ln(2)
-        qk_scale = sm_scale * RCP_LN2
-
         # if start_m is negative, the current N-tile has no block on the
         #   diagonal of causal mask, so everything have no causal mask
         if DEBUG_TRITON: print(f"Masked: start_n: {start_n}; start_m: {start_m}, num_steps: {num_steps}")
         dk, dv = _bwd_dkdv_inner(
             dk, dv,  # output tensors
-            Q_ptr, k, v, DO_ptr, M_ptr, Delta_ptr, qk_scale, # input tensors
+            Q_ptr, k, v, DO_ptr, M_ptr, Delta_ptr, sm_scale, # input tensors
             stride_qm, stride_qk,  # strides for q
             stride_dropoutm, stride_dropoutn,  # strides for dropout
             stride_deltam,
@@ -334,6 +336,7 @@ def _bwd_kernel_dkdv(
             start_n, start_m, num_steps,  # iteration numbers
             MASK=True,  # causal masking
             ENABLE_DROPOUT=ENABLE_DROPOUT,  # activate dropout
+            USE_EXP2=USE_EXP2,
             DEBUG_TRITON=DEBUG_TRITON,
             DEBUG_TRITON_DETAIL=DEBUG_TRITON_DETAIL,
         )
@@ -346,7 +349,7 @@ def _bwd_kernel_dkdv(
         if DEBUG_TRITON: print("unMasked")
         dk, dv = _bwd_dkdv_inner(
             dk, dv,  # output tensors
-            Q_ptr, k, v, DO_ptr, M_ptr, Delta_ptr, qk_scale, # input tensors
+            Q_ptr, k, v, DO_ptr, M_ptr, Delta_ptr, sm_scale, # input tensors
             stride_qm, stride_qk,  # strides for q
             stride_dropoutm, stride_dropoutn,  # strides for dropout
             stride_deltam,
@@ -357,6 +360,7 @@ def _bwd_kernel_dkdv(
             start_n, start_m, num_steps,  # iteration numbers
             MASK=False,  # causal masking
             ENABLE_DROPOUT=ENABLE_DROPOUT,  # activate dropout
+            USE_EXP2=USE_EXP2,
             DEBUG_TRITON=DEBUG_TRITON,
             DEBUG_TRITON_DETAIL=DEBUG_TRITON_DETAIL,
         )
@@ -371,7 +375,7 @@ def _bwd_kernel_dkdv(
 @triton.jit
 def _bwd_dq_inner(
     dq,  # output
-    q, K, V, do, m, Delta, qk_scale, # input
+    q, K, V, do, m, Delta, sm_scale, # input
     # shared by Q/K/V/DO.
     stride_qm, stride_qk, stride_kn,
     stride_dropoutm, stride_dropoutn,  # stride for dropout
@@ -386,6 +390,7 @@ def _bwd_dq_inner(
     start_m, start_n, end_n, num_steps,  #
     MASK: tl.constexpr,
     ENABLE_DROPOUT: tl.constexpr,
+    USE_EXP2: tl.constexpr,
     DEBUG_TRITON: tl.constexpr,
     DEBUG_TRITON_DETAIL: tl.constexpr,
 ):
@@ -443,8 +448,12 @@ def _bwd_dq_inner(
             dropout_scale = 1 / (1 - dropout_p)
 
         qk = tl.dot(q, kT)
-        if DEBUG_TRITON_DETAIL: print(f"qk scaled: {qk.shape}\n", qk * qk_scale / RCP_LN2)
-        p = tl.math.exp2(qk * qk_scale - m * RCP_LN2)
+        if DEBUG_TRITON_DETAIL: print(f"qk scaled: {qk.shape}\n", qk * sm_scale)  # noqa: E701
+        if USE_EXP2:
+            p = tl.math.exp2(qk * sm_scale * RCP_LN2 - m * RCP_LN2)
+        else:
+            p = tl.math.exp(qk * sm_scale - m)
+
         # Autoregressive masking.
         if MASK:
             causal_mask = (offs_m[:, None] - delta_qk) >= offs_n[None, :]
@@ -487,6 +496,7 @@ def _bwd_kernel_dq(
     CAUSAL: tl.constexpr,
     ENABLE_DROPOUT: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    USE_EXP2: tl.constexpr,
     DEBUG_TRITON: tl.constexpr,
     DEBUG_TRITON_DETAIL: tl.constexpr,
 ):
@@ -576,7 +586,6 @@ def _bwd_kernel_dq(
 
         # scaling factor
         RCP_LN2: tl.constexpr = 1.4426950408889634  # = 1.0 / ln(2)
-        qk_scale = sm_scale * RCP_LN2
 
         if DEBUG_TRITON: print(f"pid: {pid}; end_n: {end_n}, start_m: {start_m}")
         # Compute dQ for masked (diagonal) blocks.
@@ -587,7 +596,7 @@ def _bwd_kernel_dq(
         if DEBUG_TRITON: print(f"Masked: start_m: {start_m}, start_n: {start_n}, end_n: {end_n}, num_steps: {num_steps}")
         dq = _bwd_dq_inner(
             dq,
-            q, K, V, do, m, Delta_ptr, qk_scale, #
+            q, K, V, do, m, Delta_ptr, sm_scale, #
             stride_qm, stride_qk, stride_kn,
             stride_dropoutm, stride_dropoutn,  #
             stride_deltam,
@@ -598,6 +607,7 @@ def _bwd_kernel_dq(
             start_m, start_n, end_n, num_steps,  #
             MASK=True,  #
             ENABLE_DROPOUT=ENABLE_DROPOUT,
+            USE_EXP2=USE_EXP2,
             DEBUG_TRITON=DEBUG_TRITON,
             DEBUG_TRITON_DETAIL=DEBUG_TRITON_DETAIL,
         )
@@ -607,7 +617,7 @@ def _bwd_kernel_dq(
         if DEBUG_TRITON: print(f"unMasked: start_m: {start_m}, start_n: {start_n}, end_n: {end_n}, num_steps: {num_steps}")
         dq = _bwd_dq_inner(
             dq,  #
-            q, K, V, do, m, Delta_ptr, qk_scale, #
+            q, K, V, do, m, Delta_ptr, sm_scale, #
             stride_qm, stride_qk, stride_kn,  #
             stride_dropoutm, stride_dropoutn,  #
             stride_deltam,
