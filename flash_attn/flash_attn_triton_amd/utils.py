@@ -316,6 +316,22 @@ def create_dropout_mask(dropout_p, shape, seed):
     rand_vals = torch.rand(shape, generator=torch.Generator(device=device).manual_seed(seed), device=device, dtype=torch.float32)
     return rand_vals > dropout_p
 
+def create_dropout_mask_varlen(dropout_p, batch, nheads_q, cu_seqlens_q, cu_seqlens_k, philox_seed):
+    device = "cuda"
+    qlens = (cu_seqlens_q[1:] - cu_seqlens_q[:-1])
+    klens = (cu_seqlens_k[1:] - cu_seqlens_k[:-1])
+    max_qlen = qlens.max()
+    max_klen = klens.max()
+    dropout_mask = torch.zeros((batch, nheads_q, max_qlen, max_klen), device=device)
+    for b in range(batch):
+        qlen = qlens[b]
+        klen = klens[b]
+        rand_vals = torch.rand((nheads_q, qlen, klen), generator=torch.Generator(device=device).manual_seed(philox_seed), device=device, dtype=torch.float32)
+        submask = rand_vals > dropout_p
+        dropout_mask[b, :, :qlen, :klen] = submask
+
+    return dropout_mask
+
 def write_dropout_mask(x, tensor_name = "tensor"):
     batch, head, seqlen_m, seqlen_n = x.shape
     x = x.tolist()

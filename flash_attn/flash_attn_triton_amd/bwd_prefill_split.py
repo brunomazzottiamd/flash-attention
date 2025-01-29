@@ -1,9 +1,9 @@
 import torch
 import triton
 import triton.language as tl
-from .utils import DEBUG, DEBUG_TRITON, DROPOUT_USE_PYTORCH, DROPOUT_DUMP, \
+from .utils import DROPOUT_USE_PYTORCH, DROPOUT_DUMP, \
     get_shape_from_layout, get_strides_from_layout, write_dropout_mask, \
-    create_dropout_mask
+    create_dropout_mask, create_dropout_mask_varlen
 
 # NOTE: triton fails to import tl.constexprs so create them here for the file
 tl_DROPOUT_USE_PYTORCH: tl.constexpr = DROPOUT_USE_PYTORCH
@@ -114,6 +114,7 @@ def _bwd_dkdv_inner(
         mask_m = offs_m < seqlen_q
         mask_qT = mask_m[None, :]
         mask_do = mask_m[:, None]
+        mask_nm = mask_n[:, None] & (offs_m[None, :] < seqlen_q)
         if PADDED_HEAD:
             mask_qT &= offs_k[:, None] < ACTUAL_HEAD_DIM
             mask_do &= offs_k[None, :] < ACTUAL_HEAD_DIM
@@ -129,12 +130,12 @@ def _bwd_dkdv_inner(
                                offs_n[:, None] * stride_dropoutn
                 dropout_mask = tl.load(
                     curr_dropout_offset + dropout_offs,
-                    mask=mask_m[:, None] & mask_n[None, :]
+                    mask=mask_nm
                 )
             else:
                 rand_vals = tl.rand(philox_seed, philox_offs)
                 dropout_mask = rand_vals > dropout_p
-            dropout_scale = 1 / (1 - dropout_p)
+            dropout_scale = 1.0 / (1 - dropout_p)
         # Load m before computing qk to reduce pipeline stall.
         m = tl.load(M + offs_m * stride_deltam, mask=mask_m, other=0.0)
         qkT = tl.dot(k, qT)
@@ -147,7 +148,6 @@ def _bwd_dkdv_inner(
         pT = tl.math.exp2(qkT * qk_scale - m[None, :] * RCP_LN2)
         # Autoregressive masking.
         if MASK:
-            mask_nm = mask_n[:, None] & (offs_m[None, :] < seqlen_q)
             # offset offs_m with delta_qk since the causal mask starts at
             # bottom right of the (seqlen_q, seqlen_k) matrix
             causal_mask = (offs_m[None, :] - delta_qk) >= offs_n[:, None]
@@ -160,12 +160,16 @@ def _bwd_dkdv_inner(
         do = tl.load(do_ptrs, mask=mask_do, other=0.0)
         # Compute dV.
         if ENABLE_DROPOUT:
-            pT = tl.where(dropout_mask, pT, 0.0) * dropout_scale
-        pT = pT.to(tl.float16)
+            pT_dropout = tl.where(dropout_mask, pT, 0.0) * dropout_scale
+            pT_dropout = pT_dropout.to(tl.float16)
+            dv += tl.dot(pT_dropout, do)
+        else:
+            pT = pT.to(tl.float16)
+            dv += tl.dot(pT, do)
+
         if DEBUG_TRITON_DETAIL:
             if start_n == 256:
                 print(f"pT: {pT.shape}\n", pT)
-        dv += tl.dot(pT, do)
         # D (= delta) is pre-divided by ds_scale.
         Di = tl.load(D + offs_m * stride_deltam, mask=mask_m)
         # Compute dP and dS.
@@ -179,9 +183,6 @@ def _bwd_dkdv_inner(
         curr_m += step_m
         qT_ptrs += step_m * stride_qm
         do_ptrs += step_m * stride_qm
-        if ENABLE_DROPOUT:
-            curr_dropout_offset += step_m * stride_qm
-            curr_philox_offset += step_m * stride_qm
     return dk, dv
 
 
@@ -236,7 +237,7 @@ def _bwd_kernel_dkdv(
     # determine the starting M blocks to skip some initial blocks masked by
     # causal.
     delta_qk = seqlen_q - seqlen_k
-    if DEBUG_TRITON: print(f"\npid: {pid}")
+    if DEBUG_TRITON: print(f"\npid: {pid}, bid: {bid}, hkid: {hkid}")
     if DEBUG_TRITON: print(f"delta_qk = {delta_qk}")
     # q > k: diretcly skip all the way until the start of causal block
     start_delta_q_gt_k = delta_qk
@@ -306,6 +307,8 @@ def _bwd_kernel_dkdv(
                              hqid * stride_dropouth
 
         MASK_BLOCK_M: tl.constexpr = BLOCK_M // BLK_SLICE_FACTOR
+        # bound the masked operation to q len so it does not have to wast cycles
+        len_m = min(len_m, seqlen_q)
         num_steps = tl.cdiv(len_m, MASK_BLOCK_M)
         # when q < k, we may skip the initial masked op
         if pid < num_blocks_skip:
@@ -416,6 +419,7 @@ def _bwd_dq_inner(
         if DEBUG_TRITON_DETAIL: print(f"start_n = {start_n}, end_n = {end_n}, offs_n: {offs_n.shape}\n{offs_n}")
         if DEBUG_TRITON_DETAIL: print(f"mask_n: {mask_n.shape}\n{mask_n}")
         mask_kT = mask_n[None, :]
+        mask_mn = mask_m[:, None] & (offs_n[None, :] < end_n)
         if PADDED_HEAD:
             mask_kT &= offs_k[:, None] < ACTUAL_HEAD_DIM
 
@@ -428,11 +432,11 @@ def _bwd_dq_inner(
                           offs_m[None, :] * stride_dropoutm + \
                           offs_n[:, None] * stride_dropoutn
             if tl_DROPOUT_USE_PYTORCH:
-                dropout_offs = offs_m[None, :] * stride_dropoutm + \
-                               offs_n[:, None] * stride_dropoutn
+                dropout_offs = offs_m[:, None] * stride_dropoutm + \
+                               offs_n[None, :] * stride_dropoutn
                 dropout_mask = tl.load(
                     curr_dropout_offset + dropout_offs,
-                    mask=mask_m[:, None] & mask_n[None, :])
+                    mask=mask_mn)
             else:
                 rand_vals = tl.rand(philox_seed, philox_offs)
                 dropout_mask = rand_vals > dropout_p
@@ -443,14 +447,12 @@ def _bwd_dq_inner(
         p = tl.math.exp2(qk * qk_scale - m * RCP_LN2)
         # Autoregressive masking.
         if MASK:
-            mask_mn = mask_m[:, None] & (offs_n[None, :] < end_n)
             causal_mask = (offs_m[:, None] - delta_qk) >= offs_n[None, :]
             mask = causal_mask & mask_mn
             p = tl.where(mask, p, 0.0)
         # Compute dP and dS.
         dp = tl.dot(do, vT).to(tl.float32)
         if ENABLE_DROPOUT:
-            p = tl.where(dropout_mask, p, 0.0) * dropout_scale
             dp = tl.where(dropout_mask, dp, 0.0) * dropout_scale
         ds = p * (dp - Di[:, None])
         ds = ds.to(tl.float16)
@@ -461,8 +463,6 @@ def _bwd_dq_inner(
         curr_n += step_n
         kT_ptrs += step_n * stride_kn
         vT_ptrs += step_n * stride_kn
-        curr_dropout_offset += step_n * stride_kn
-        curr_philox_offset += step_n * stride_kn
     return dq
 
 
@@ -653,7 +653,6 @@ def attention_prefill_backward_triton_split_impl(
     DEBUG_TRITON_DETAIL: bool,
 ):
     # make contigious
-    # TODO: why making this continguous????
     q = q.contiguous()
     k = k.contiguous()
     v = v.contiguous()
@@ -715,18 +714,24 @@ def attention_prefill_backward_triton_split_impl(
     stride_dropoutb, stride_dropouth, stride_dropoutm, stride_dropoutn = \
         (0, 0 , 0 , 0)
     if use_dropout:
+        dropout_mask = torch.zeros(
+            (batch, nheads_q, max_seqlen_q, max_seqlen_k),
+            device=q.device,
+            dtype=torch.float32
+        )
+
         if DROPOUT_USE_PYTORCH:
-            dropout_mask = create_dropout_mask(
-                dropout_p,
-                (batch, nheads_q, max_seqlen_q, max_seqlen_k),
-                seed = philox_seed
-            )
-        else:
-            dropout_mask = torch.zeros(
-                (batch, nheads_q, max_seqlen_q, max_seqlen_k),
-                device=q.device,
-                dtype=torch.float32
-            )
+            if not IS_VARLEN:
+                dropout_mask = create_dropout_mask(
+                    dropout_p,
+                    (batch, nheads_q, max_seqlen_q, max_seqlen_k),
+                    seed = philox_seed
+                )
+            else:
+                dropout_mask = create_dropout_mask_varlen(
+                    dropout_p, batch, nheads_q,
+                    cu_seqlens_q, cu_seqlens_k, philox_seed
+                )
         stride_dropoutb, stride_dropouth, stride_dropoutm, stride_dropoutn = ( \
             dropout_mask.stride(0),
             dropout_mask.stride(1),
