@@ -432,8 +432,8 @@ def _bwd_dq_inner(
         if ENABLE_DROPOUT:
             # NOTE: dropout is transposed because it is used to mask pT
             philox_offs = curr_philox_offset + \
-                          offs_m[None, :] * stride_dropoutm + \
-                          offs_n[:, None] * stride_dropoutn
+                          offs_m[:, None] * stride_dropoutm + \
+                          offs_n[None, :] * stride_dropoutn
             if tl_DROPOUT_USE_PYTORCH:
                 dropout_offs = offs_m[:, None] * stride_dropoutm + \
                                offs_n[None, :] * stride_dropoutn
